@@ -425,7 +425,23 @@ func validateOutput(text string, schema map[string]interface{}) (map[string]inte
 	return parsed, nil
 }
 
-// --- Telegram ---
+// --- Operator Channel Interface ---
+// Each channel (TG, Slack, etc.) implements this interface.
+// The engine doesn't know which channel it's talking to.
+
+type OperatorChannel interface {
+	// Send a plain notification (no approval needed)
+	Send(text string) error
+	// Send a draft for approval with action buttons. Returns the operator's decision.
+	SendForApproval(ctx context.Context, draft string) (OperatorDecision, error)
+}
+
+type OperatorDecision struct {
+	Action string // "approve", "skip", "adjust"
+	Text   string // adjustment text (only if Action == "adjust")
+}
+
+// --- Telegram Channel ---
 
 type TGBot struct {
 	token       string
@@ -435,149 +451,218 @@ type TGBot struct {
 	rateLimiter *RateLimiter
 }
 
-func (t *TGBot) send(text string) (int, error) {
-	reqBody := map[string]interface{}{
-		"chat_id":    t.chatID,
-		"text":       text,
-		"parse_mode": "Markdown",
-	}
-	body, _ := json.Marshal(reqBody)
+func (t *TGBot) apiCall(method string, payload map[string]interface{}) (json.RawMessage, error) {
+	body, _ := json.Marshal(payload)
 	resp, err := http.Post(
-		fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", t.token),
+		fmt.Sprintf("https://api.telegram.org/bot%s/%s", t.token, method),
 		"application/json",
 		bytes.NewReader(body),
 	)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
 
 	var result struct {
-		OK     bool `json:"ok"`
-		Result struct {
-			MessageID int `json:"message_id"`
-		} `json:"result"`
+		OK          bool            `json:"ok"`
+		Description string          `json:"description"`
+		Result      json.RawMessage `json:"result"`
 	}
 	json.Unmarshal(respBody, &result)
 	if !result.OK {
-		return 0, fmt.Errorf("TG send failed: %s", string(respBody))
+		return nil, fmt.Errorf("TG %s failed: %s", method, result.Description)
 	}
-	return result.Result.MessageID, nil
+	return result.Result, nil
 }
 
-func (t *TGBot) sendReply(text string, replyTo int) (int, error) {
-	reqBody := map[string]interface{}{
-		"chat_id":              t.chatID,
-		"text":                 text,
-		"parse_mode":           "Markdown",
-		"reply_to_message_id":  replyTo,
-	}
-	body, _ := json.Marshal(reqBody)
-	resp, err := http.Post(
-		fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", t.token),
-		"application/json",
-		bytes.NewReader(body),
-	)
+func (t *TGBot) Send(text string) error {
+	_, err := t.apiCall("sendMessage", map[string]interface{}{
+		"chat_id": t.chatID,
+		"text":    text,
+	})
+	return err
+}
+
+// sendWithButtons sends a message with inline keyboard buttons.
+// Returns the message ID.
+func (t *TGBot) sendWithButtons(text string, buttons [][]map[string]string) (int, error) {
+	raw, err := t.apiCall("sendMessage", map[string]interface{}{
+		"chat_id":      t.chatID,
+		"text":         text,
+		"reply_markup": map[string]interface{}{"inline_keyboard": buttons},
+	})
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-
-	var result struct {
-		OK     bool `json:"ok"`
-		Result struct {
-			MessageID int `json:"message_id"`
-		} `json:"result"`
+	var msg struct {
+		MessageID int `json:"message_id"`
 	}
-	json.Unmarshal(respBody, &result)
-	return result.Result.MessageID, nil
+	json.Unmarshal(raw, &msg)
+	return msg.MessageID, nil
 }
 
-// waitForReply polls for a reply to a specific message. Returns the reply text.
-// All operator input passes through security validation before being returned.
-func (t *TGBot) waitForReply(ctx context.Context, msgID int) (string, error) {
+// editButtons replaces the inline keyboard on an existing message.
+func (t *TGBot) editButtons(msgID int, text string, buttons [][]map[string]string) {
+	payload := map[string]interface{}{
+		"chat_id":    t.chatID,
+		"message_id": msgID,
+		"text":       text,
+	}
+	if buttons != nil {
+		payload["reply_markup"] = map[string]interface{}{"inline_keyboard": buttons}
+	} else {
+		// Remove keyboard
+		payload["reply_markup"] = map[string]interface{}{"inline_keyboard": []interface{}{}}
+	}
+	t.apiCall("editMessageText", payload)
+}
+
+func (t *TGBot) answerCallback(callbackID string, text string) {
+	t.apiCall("answerCallbackQuery", map[string]interface{}{
+		"callback_query_id": callbackID,
+		"text":              text,
+	})
+}
+
+// SendForApproval posts a draft with Approve/Skip/Adjust buttons.
+// Waits for the operator to click a button or send a text reply for adjustment.
+func (t *TGBot) SendForApproval(ctx context.Context, draft string) (OperatorDecision, error) {
+	buttons := [][]map[string]string{
+		{
+			{"text": "Approve", "callback_data": "approve"},
+			{"text": "Skip", "callback_data": "skip"},
+			{"text": "Adjust...", "callback_data": "adjust"},
+		},
+	}
+
+	msgID, err := t.sendWithButtons(draft, buttons)
+	if err != nil {
+		return OperatorDecision{}, fmt.Errorf("failed to send draft: %w", err)
+	}
+	log.Printf("[telegram] draft posted (msg_id=%d), waiting for operator action...", msgID)
+
+	// Poll for callback queries (button clicks) or text replies
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
+
+	waitingForText := false
 
 	for {
 		select {
 		case <-ctx.Done():
-			return "", fmt.Errorf("approval timeout")
+			t.editButtons(msgID, draft+"\n\n[Timed out]", nil)
+			return OperatorDecision{}, fmt.Errorf("approval timeout")
 		case <-ticker.C:
 			updates, err := t.getUpdates()
 			if err != nil {
 				continue
 			}
 			for _, u := range updates {
-				// 1. Chat ID check — wrong chat, silently ignore
-				if u.Message.Chat.ID != t.chatID {
-					continue
-				}
+				// Handle callback query (button click)
+				if u.CallbackQuery != nil {
+					cb := u.CallbackQuery
+					// Security: verify user
+					if !t.isAllowedUser(cb.From.ID) {
+						t.answerCallback(cb.ID, "Access denied.")
+						log.Printf("[security] REJECTED callback from user %d", cb.From.ID)
+						continue
+					}
+					if !t.rateLimiter.allow(cb.From.ID) {
+						t.answerCallback(cb.ID, "Rate limited.")
+						continue
+					}
+					// Must be for our message
+					if cb.Message.MessageID != msgID {
+						continue
+					}
 
-				// 2. User ID check — must be in allowed_users list
-				userID := u.Message.From.ID
-				allowed := false
-				for _, id := range t.security.AllowedUsers {
-					if id == userID {
-						allowed = true
-						break
+					switch cb.Data {
+					case "approve":
+						t.answerCallback(cb.ID, "Approved")
+						t.editButtons(msgID, draft+"\n\n[Approved]", nil)
+						return OperatorDecision{Action: "approve"}, nil
+					case "skip":
+						t.answerCallback(cb.ID, "Skipped")
+						t.editButtons(msgID, draft+"\n\n[Skipped]", nil)
+						return OperatorDecision{Action: "skip"}, nil
+					case "adjust":
+						t.answerCallback(cb.ID, "Send your adjustment as a text message")
+						waitingForText = true
+						t.editButtons(msgID, draft+"\n\n[Waiting for adjustment text...]", nil)
 					}
 				}
-				if !allowed {
-					log.Printf("[security] REJECTED: user %d not in allowed_users", userID)
-					t.sendReply("Access denied. Your user ID is not authorized.", u.Message.MessageID)
-					continue
-				}
 
-				// 3. Rate limit check
-				if !t.rateLimiter.allow(userID) {
-					log.Printf("[security] RATE_LIMITED: user %d exceeded %d msg/min", userID, t.rateLimiter.limit)
-					t.sendReply("Rate limited. Please wait before sending another message.", u.Message.MessageID)
-					continue
-				}
+				// Handle text message (adjustment)
+				if waitingForText && u.Message.Text != "" {
+					// Security checks
+					if u.Message.Chat.ID != t.chatID {
+						continue
+					}
+					if !t.isAllowedUser(u.Message.From.ID) {
+						log.Printf("[security] REJECTED text from user %d", u.Message.From.ID)
+						continue
+					}
+					if !t.rateLimiter.allow(u.Message.From.ID) {
+						continue
+					}
 
-				// Must be a reply to our message
-				if u.Message.ReplyToMessage == nil || u.Message.ReplyToMessage.MessageID != msgID {
-					continue
-				}
+					// Input validation
+					result := validateOperatorInput(u.Message.Text, t.security)
+					if !result.Clean {
+						log.Printf("[security] %s (user: %d)", result.Reason, u.Message.From.ID)
+						t.Send("Input rejected: " + result.Reason)
+						continue
+					}
 
-				// 4. Input validation — length, injection patterns, sanitization
-				result := validateOperatorInput(u.Message.Text, t.security)
-				if !result.Clean {
-					log.Printf("[security] %s (user: %d, text: %q)", result.Reason, userID, u.Message.Text)
-					t.sendReply("Input rejected. "+result.Reason, u.Message.MessageID)
-					continue
+					return OperatorDecision{Action: "adjust", Text: result.Text}, nil
 				}
-
-				return result.Text, nil
 			}
 		}
 	}
 }
 
+func (t *TGBot) isAllowedUser(userID int64) bool {
+	for _, id := range t.security.AllowedUsers {
+		if id == userID {
+			return true
+		}
+	}
+	return false
+}
+
 type TGUpdate struct {
-	UpdateID int `json:"update_id"`
-	Message  struct {
-		MessageID int    `json:"message_id"`
-		Text      string `json:"text"`
-		From      struct {
-			ID int64 `json:"id"`
-		} `json:"from"`
-		Chat struct {
-			ID int64 `json:"id"`
-		} `json:"chat"`
-		ReplyToMessage *struct {
-			MessageID int `json:"message_id"`
-		} `json:"reply_to_message"`
+	UpdateID      int            `json:"update_id"`
+	Message       *TGMessage     `json:"message"`
+	CallbackQuery *TGCallback    `json:"callback_query"`
+}
+
+type TGMessage struct {
+	MessageID int    `json:"message_id"`
+	Text      string `json:"text"`
+	From      struct {
+		ID int64 `json:"id"`
+	} `json:"from"`
+	Chat struct {
+		ID int64 `json:"id"`
+	} `json:"chat"`
+}
+
+type TGCallback struct {
+	ID   string `json:"id"`
+	From struct {
+		ID int64 `json:"id"`
+	} `json:"from"`
+	Message struct {
+		MessageID int `json:"message_id"`
 	} `json:"message"`
+	Data string `json:"data"`
 }
 
 func (t *TGBot) getUpdates() ([]TGUpdate, error) {
 	resp, err := http.Get(fmt.Sprintf(
-		"https://api.telegram.org/bot%s/getUpdates?offset=%d&timeout=1",
-		t.token, t.offset,
+		"https://api.telegram.org/bot%s/getUpdates?offset=%d&timeout=1&allowed_updates=%s",
+		t.token, t.offset, `["message","callback_query"]`,
 	))
 	if err != nil {
 		return nil, err
@@ -600,7 +685,7 @@ func (t *TGBot) getUpdates() ([]TGUpdate, error) {
 
 // --- Pipeline Engine ---
 
-func runPipeline(cfg *Config, pipeline PipelineConfig, budget *BudgetTracker, bot *TGBot) error {
+func runPipeline(cfg *Config, pipeline PipelineConfig, budget *BudgetTracker, ch OperatorChannel) error {
 	log.Printf("[pipeline:%s] starting", pipeline.Name)
 	budget.tokensUsedPipeline = 0
 
@@ -684,7 +769,7 @@ Description: We need an experienced LLM engineer to build a retrieval-augmented 
 			data["ai_raw"] = resp.Text
 
 		case "approval":
-			// Post draft to operator channel
+			// Build draft message from AI output
 			aiOutput := data["ai_output"]
 			var draftMsg string
 
@@ -697,54 +782,41 @@ Description: We need an experienced LLM engineer to build a retrieval-augmented 
 				if reject {
 					status = "REJECT"
 				}
-				draftMsg = fmt.Sprintf("*[aiops] %s — Score: %d/5*\n\n%s\n\n_%s_\n\nReply: `ok` to approve, `skip` to skip, or any text to adjust",
-					status, int(score), reason, fmt.Sprintf("%v", data["input"]))
+				draftMsg = fmt.Sprintf("[aiops] %s - Score: %d/5\n\n%s\n\n%v",
+					status, int(score), reason, data["input"])
 			default:
-				draftMsg = fmt.Sprintf("*[aiops] Draft for review:*\n\n%v\n\nReply: `ok` to approve, `skip` to skip, or any text to adjust", v)
+				draftMsg = fmt.Sprintf("[aiops] Draft for review:\n\n%v", v)
 			}
 
-			msgID, err := bot.send(draftMsg)
-			if err != nil {
-				return fmt.Errorf("[step:%s] failed to send to operator: %w", step.Name, err)
-			}
-			log.Printf("[pipeline:%s][step:%s] posted to TG (msg_id=%d), waiting for reply...", pipeline.Name, step.Name, msgID)
-
-			// Wait for operator reply with timeout
+			// Send for approval via operator channel (TG buttons, Slack reactions, etc.)
 			approvalTimeout, _ := time.ParseDuration(cfg.Timeouts.OperatorApproval)
 			if approvalTimeout == 0 {
 				approvalTimeout = 4 * time.Hour
 			}
 			approvalCtx, approvalCancel := context.WithTimeout(ctx, approvalTimeout)
-
-			reply, err := bot.waitForReply(approvalCtx, msgID)
+			decision, err := ch.SendForApproval(approvalCtx, draftMsg)
 			approvalCancel()
 			if err != nil {
-				bot.sendReply("Approval timed out. Skipping.", msgID)
 				return fmt.Errorf("[step:%s] %w", step.Name, err)
 			}
 
-			reply = strings.TrimSpace(strings.ToLower(reply))
-			log.Printf("[pipeline:%s][step:%s] operator replied: %q", pipeline.Name, step.Name, reply)
+			log.Printf("[pipeline:%s][step:%s] operator decision: %s", pipeline.Name, step.Name, decision.Action)
 
-			switch reply {
-			case "ok", "yes", "approve":
-				bot.sendReply("Approved. Executing.", msgID)
+			switch decision.Action {
+			case "approve":
 				data["approved"] = true
-			case "skip", "no", "reject":
-				bot.sendReply("Skipped.", msgID)
+			case "skip":
 				data["approved"] = false
-				log.Printf("[pipeline:%s][step:%s] operator skipped", pipeline.Name, step.Name)
-				return nil // End pipeline
-			default:
-				// Operator wants adjustment — rewrite with AI
-				log.Printf("[pipeline:%s][step:%s] operator requested adjustment: %q", pipeline.Name, step.Name, reply)
+				return nil
+			case "adjust":
+				log.Printf("[pipeline:%s][step:%s] adjustment: %q", pipeline.Name, step.Name, decision.Text)
 
 				if err := budget.check(cfg.Budgets.PerDayTokens, cfg.Budgets.PerStepTokens); err != nil {
-					bot.sendReply(fmt.Sprintf("Budget exceeded, cannot rewrite: %s", err), msgID)
+					ch.Send(fmt.Sprintf("Budget exceeded, cannot rewrite: %s", err))
 					return err
 				}
 
-				adjustPrompt := fmt.Sprintf("Original output:\n%s\n\nOperator feedback:\n%s\n\nRewrite the output incorporating the feedback. Respond with ONLY valid JSON in the same format.", data["ai_raw"], reply)
+				adjustPrompt := fmt.Sprintf("Original output:\n%s\n\nOperator feedback:\n%s\n\nRewrite incorporating the feedback. Respond with ONLY valid JSON in the same format.", data["ai_raw"], decision.Text)
 
 				aiTimeout, _ := time.ParseDuration(cfg.Timeouts.AICall)
 				if aiTimeout == 0 {
@@ -754,26 +826,22 @@ Description: We need an experienced LLM engineer to build a retrieval-augmented 
 				resp, err := callLLM(aiCtx, cfg, "drafter", adjustPrompt)
 				aiCancel()
 				if err != nil {
-					bot.sendReply(fmt.Sprintf("Rewrite failed: %s", err), msgID)
+					ch.Send(fmt.Sprintf("Rewrite failed: %s", err))
 					return err
 				}
 				budget.record(resp.InputTokens + resp.OutputTokens)
 
-				bot.sendReply(fmt.Sprintf("*Revised:*\n%s\n\nReply `ok` to approve or `skip`", resp.Text), msgID)
-
-				// Wait for second approval
+				// Show revised output and ask for final approval
+				revisedDraft := fmt.Sprintf("[aiops] Revised:\n\n%s", resp.Text)
 				approvalCtx2, approvalCancel2 := context.WithTimeout(ctx, approvalTimeout)
-				reply2, err := bot.waitForReply(approvalCtx2, msgID)
+				decision2, err := ch.SendForApproval(approvalCtx2, revisedDraft)
 				approvalCancel2()
 				if err != nil {
 					return err
 				}
-				reply2 = strings.TrimSpace(strings.ToLower(reply2))
-				if reply2 == "ok" || reply2 == "yes" || reply2 == "approve" {
-					bot.sendReply("Approved. Executing.", msgID)
+				if decision2.Action == "approve" {
 					data["approved"] = true
 				} else {
-					bot.sendReply("Skipped.", msgID)
 					return nil
 				}
 			}
@@ -838,11 +906,11 @@ func main() {
 	}
 
 	// Send startup notification
-	bot.send("*[aiops]* Engine started. Running pipeline: `" + cfg.Pipelines[0].Name + "`")
+	bot.Send("[aiops] Engine started. Running pipeline: " + cfg.Pipelines[0].Name)
 
 	if err := runPipeline(&cfg, cfg.Pipelines[0], budget, bot); err != nil {
 		log.Printf("pipeline error: %v", err)
-		bot.send(fmt.Sprintf("*[aiops] ERROR:* `%s`", err))
+		bot.Send(fmt.Sprintf("[aiops] ERROR: %s", err))
 	}
 
 	log.Printf("aiops done. daily tokens used: %d", budget.tokensUsedToday)
