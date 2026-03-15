@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -1617,6 +1618,45 @@ func main() {
 
 						// Intent detection — handle common requests directly
 						lower := strings.ToLower(text)
+
+						// Reply intent: "reply to 1 ...", "respond to the first ...", "reply 2 saying ..."
+						if gmail != nil && (strings.HasPrefix(lower, "reply") || strings.HasPrefix(lower, "respond")) {
+							// Extract number and optional body
+							re := regexp.MustCompile(`(?:reply|respond)\s+(?:to\s+)?(?:the\s+)?(?:first|second|third|(\d+))(?:\s+(?:saying|with|:)?\s*(.*))?`)
+							m := re.FindStringSubmatch(lower)
+							num := 0
+							replyText := ""
+							if m != nil {
+								switch {
+								case m[1] != "":
+									fmt.Sscanf(m[1], "%d", &num)
+								case strings.Contains(m[0], "first"):
+									num = 1
+								case strings.Contains(m[0], "second"):
+									num = 2
+								case strings.Contains(m[0], "third"):
+									num = 3
+								}
+								if m[2] != "" {
+									// Use original case for the reply text
+									idx := strings.Index(lower, m[2])
+									if idx >= 0 {
+										replyText = text[idx:]
+									}
+								}
+							}
+							if num == 0 {
+								num = 1 // default to first email
+							}
+							args := fmt.Sprintf("%d", num)
+							if replyText != "" {
+								args += " " + replyText
+							}
+							handleReply(args, bot, &cfg, budget)
+							continue
+						}
+
+						// Email fetch intent
 						if gmail != nil && (strings.Contains(lower, "email") || strings.Contains(lower, "inbox") || strings.Contains(lower, "mail") || strings.Contains(lower, "unread") || strings.Contains(lower, "sent")) {
 							query := ""
 							if strings.Contains(lower, "sent") {
