@@ -1677,7 +1677,9 @@ Rules:
 							intentResp, err := callLLM(intentCtx, &cfg, "classifier", intentPrompt)
 							intentCancel()
 
-							if err == nil {
+							if err != nil {
+								log.Printf("[intent] classifier error: %v", err)
+							} else {
 								budget.record(intentResp.InputTokens + intentResp.OutputTokens)
 								// Parse intent
 								cleaned := strings.TrimSpace(intentResp.Text)
@@ -1693,7 +1695,9 @@ Rules:
 									Number int    `json:"number"`
 									Body   string `json:"body"`
 								}
-								if json.Unmarshal([]byte(cleaned), &intent) == nil {
+								if err := json.Unmarshal([]byte(cleaned), &intent); err != nil {
+									log.Printf("[intent] parse error: %v (raw: %q)", err, cleaned)
+								} else {
 									log.Printf("[intent] %s (number=%d, query=%q, body=%q)", intent.Intent, intent.Number, intent.Query, intent.Body)
 									switch intent.Intent {
 									case "emails":
