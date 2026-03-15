@@ -1064,6 +1064,61 @@ Description: We need an experienced LLM engineer to build a retrieval-augmented 
 
 var gmail *GmailConnector // initialized in main if configured
 
+// --- Chat History ---
+// Per-chat conversation buffer. Keeps last N turns for context.
+
+type ChatHistory struct {
+	mu       sync.Mutex
+	messages []ChatMessage
+	maxTurns int
+}
+
+type ChatMessage struct {
+	Role    string // "user" or "assistant"
+	Content string
+	Time    time.Time
+}
+
+func newChatHistory(maxTurns int) *ChatHistory {
+	if maxTurns == 0 {
+		maxTurns = 20
+	}
+	return &ChatHistory{maxTurns: maxTurns}
+}
+
+func (h *ChatHistory) Add(role string, content string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.messages = append(h.messages, ChatMessage{Role: role, Content: content, Time: time.Now()})
+	// Trim to max turns
+	if len(h.messages) > h.maxTurns*2 {
+		h.messages = h.messages[len(h.messages)-h.maxTurns*2:]
+	}
+}
+
+func (h *ChatHistory) FormatForPrompt() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.messages) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for _, m := range h.messages {
+		if m.Role == "user" {
+			sb.WriteString("Operator: " + m.Content + "\n")
+		} else {
+			sb.WriteString("Assistant: " + m.Content + "\n")
+		}
+	}
+	return sb.String()
+}
+
+func (h *ChatHistory) Len() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.messages)
+}
+
 func handleCommand(cmd string, args string, bot *TGBot, sched *Scheduler, skills *SkillRegistry, cfg *Config, budget *BudgetTracker) {
 	switch cmd {
 	case "/cron":
@@ -1335,6 +1390,7 @@ func main() {
 		rateLimiter: newRateLimiter(cfg.Telegram.Security.RateLimit),
 	}
 	budget := &BudgetTracker{dayStart: time.Now()}
+	chatHistory := newChatHistory(20) // keep last 20 turns
 
 	// Drain pending updates
 	bot.getUpdates()
@@ -1396,12 +1452,13 @@ func main() {
 							continue
 						}
 
-						// Regular message — respond via LLM
+						// Regular message — respond via LLM with conversation history
+						chatHistory.Add("user", text)
+
 						if err := budget.check(cfg.Budgets.PerDayTokens, 512); err != nil {
 							bot.Send("Budget limit reached.")
 						} else {
 							aiCtx, aiCancel := context.WithTimeout(context.Background(), 15*time.Second)
-							// Build context about available pipelines and skills
 							var skillList, pipelineList string
 							for _, s := range skillReg.List() {
 								skillList += fmt.Sprintf("\n- %s: %s", s.Name, s.Description)
@@ -1413,6 +1470,7 @@ func main() {
 							if gmail != nil {
 								gmailStatus = "connected (read-only)"
 							}
+							history := chatHistory.FormatForPrompt()
 							sysPrompt := fmt.Sprintf(`You are aiops, an AI operations assistant running as a Telegram bot.
 You manage automated pipelines and can help the operator with tasks.
 
@@ -1430,9 +1488,10 @@ Commands the operator can use:
 /run <name> - run a pipeline now
 /status - engine status
 
-When the operator asks about emails, tell them to use /emails. When they ask for features not yet available (calendar, Slack, etc), say briefly what's needed and that it's on the roadmap. Be direct, concise, no fluff.
+When the operator asks about emails, you can fetch them directly. When they ask for features not yet available (calendar, Slack, etc), say briefly what's needed and that it's on the roadmap. Be direct, concise, no fluff. Remember the conversation context.
 
-Operator: %s`, pipelineList, skillList, gmailStatus, text)
+Conversation so far:
+%s`, pipelineList, skillList, gmailStatus, history)
 							resp, err := callLLM(aiCtx, &cfg, "drafter", sysPrompt)
 							aiCancel()
 							if err != nil {
@@ -1441,6 +1500,7 @@ Operator: %s`, pipelineList, skillList, gmailStatus, text)
 							} else {
 								budget.record(resp.InputTokens + resp.OutputTokens)
 								log.Printf("[msg] LLM reply (%d tokens, %dms): %s", resp.InputTokens+resp.OutputTokens, resp.LatencyMs, resp.Text[:min(80, len(resp.Text))])
+								chatHistory.Add("assistant", resp.Text)
 								if err := bot.Send(resp.Text); err != nil {
 									log.Printf("[msg] Send error: %v", err)
 								}
