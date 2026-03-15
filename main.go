@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -1616,54 +1615,80 @@ func main() {
 						log.Printf("[msg] %q (user: %d)", text, u.Message.From.ID)
 						bot.sendTyping()
 
-						// Intent detection — handle common requests directly
-						lower := strings.ToLower(text)
+						// Intent detection via LLM — classify what the user wants
+						if gmail != nil {
+							intentCtx, intentCancel := context.WithTimeout(context.Background(), 10*time.Second)
 
-						// Reply intent: "reply to 1 ...", "respond to the first ...", "reply 2 saying ..."
-						if gmail != nil && (strings.HasPrefix(lower, "reply") || strings.HasPrefix(lower, "respond")) {
-							// Extract number and optional body
-							re := regexp.MustCompile(`(?:reply|respond)\s+(?:to\s+)?(?:the\s+)?(?:first|second|third|(\d+))(?:\s+(?:saying|with|:)?\s*(.*))?`)
-							m := re.FindStringSubmatch(lower)
-							num := 0
-							replyText := ""
-							if m != nil {
-								switch {
-								case m[1] != "":
-									fmt.Sscanf(m[1], "%d", &num)
-								case strings.Contains(m[0], "first"):
-									num = 1
-								case strings.Contains(m[0], "second"):
-									num = 2
-								case strings.Contains(m[0], "third"):
-									num = 3
+							// Build email context for the classifier
+							lastEmailsMu.Lock()
+							emailCtx := ""
+							if len(lastEmails) > 0 {
+								for i, e := range lastEmails {
+									from := e.From
+									if idx := strings.Index(from, "<"); idx > 0 {
+										from = strings.TrimSpace(from[:idx])
+									}
+									emailCtx += fmt.Sprintf("%d. %s — %s\n", i+1, strings.Trim(from, "\""), e.Subject)
 								}
-								if m[2] != "" {
-									// Use original case for the reply text
-									idx := strings.Index(lower, m[2])
-									if idx >= 0 {
-										replyText = text[idx:]
+							}
+							lastEmailsMu.Unlock()
+
+							intentPrompt := fmt.Sprintf(`Classify this message into one intent. Respond with ONLY valid JSON.
+
+Available emails:
+%s
+Message: %s
+
+If the user wants to read/check/fetch emails: {"intent":"emails","query":"<gmail query or empty>"}
+If the user wants to reply/respond/send to an email: {"intent":"reply","number":<1-based index>,"body":"<reply text or empty for AI draft>"}
+If neither: {"intent":"chat"}
+
+Rules:
+- If they mention a name or sender, match it to the email list and return the number
+- "reply to rene" = find email from rene in list, return its number
+- "send a reply" with no target = reply to email 1
+- "check sent" = {"intent":"emails","query":"in:sent"}`, emailCtx, text)
+
+							intentResp, err := callLLM(intentCtx, &cfg, "classifier", intentPrompt)
+							intentCancel()
+
+							if err == nil {
+								budget.record(intentResp.InputTokens + intentResp.OutputTokens)
+								// Parse intent
+								cleaned := strings.TrimSpace(intentResp.Text)
+								if strings.HasPrefix(cleaned, "```") {
+									lines := strings.Split(cleaned, "\n")
+									if len(lines) >= 3 {
+										cleaned = strings.Join(lines[1:len(lines)-1], "\n")
 									}
 								}
+								var intent struct {
+									Intent string `json:"intent"`
+									Query  string `json:"query"`
+									Number int    `json:"number"`
+									Body   string `json:"body"`
+								}
+								if json.Unmarshal([]byte(cleaned), &intent) == nil {
+									log.Printf("[intent] %s (number=%d, query=%q, body=%q)", intent.Intent, intent.Number, intent.Query, intent.Body)
+									switch intent.Intent {
+									case "emails":
+										handleEmails(intent.Query, bot, &cfg, budget)
+										continue
+									case "reply":
+										num := intent.Number
+										if num == 0 {
+											num = 1
+										}
+										args := fmt.Sprintf("%d", num)
+										if intent.Body != "" {
+											args += " " + intent.Body
+										}
+										handleReply(args, bot, &cfg, budget)
+										continue
+									}
+									// "chat" falls through to LLM chat below
+								}
 							}
-							if num == 0 {
-								num = 1 // default to first email
-							}
-							args := fmt.Sprintf("%d", num)
-							if replyText != "" {
-								args += " " + replyText
-							}
-							handleReply(args, bot, &cfg, budget)
-							continue
-						}
-
-						// Email fetch intent
-						if gmail != nil && (strings.Contains(lower, "email") || strings.Contains(lower, "inbox") || strings.Contains(lower, "mail") || strings.Contains(lower, "unread") || strings.Contains(lower, "sent")) {
-							query := ""
-							if strings.Contains(lower, "sent") {
-								query = "in:sent"
-							}
-							handleEmails(query, bot, &cfg, budget)
-							continue
 						}
 
 						// Regular message — respond via LLM with conversation history
