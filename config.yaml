@@ -68,9 +68,18 @@ pipelines:
       - name: log-result
         type: deterministic
 
-  # Scheduled pipeline example
-  - name: heartbeat
-    schedule: 5m
+  # Email digest — checks unread emails and reports to operator
+  - name: email-digest
+    schedule: 30m
     steps:
-      - name: ping
+      - name: fetch-unread
         type: deterministic
+        action: gmail_unread
+
+      - name: summarize
+        type: ai
+        skill: email-digest
+
+      - name: report
+        type: deterministic
+        action: notify

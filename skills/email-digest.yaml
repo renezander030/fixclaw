@@ -1,0 +1,16 @@
+name: email-digest
+description: Summarize unread emails into a brief digest
+role: classifier
+prompt: |
+  Summarize these unread emails into a brief digest. For each:
+  - Sender name
+  - Subject
+  - One-line summary of what they need/want
+  - Priority: high (needs response today), medium (this week), low (informational)
+
+  Flag anything time-sensitive. Be concise, no fluff.
+
+  Emails:
+  {{emails}}
+output_schema:
+  digest: {type: string}

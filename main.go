@@ -81,11 +81,12 @@ type PipelineConfig struct {
 
 type StepConfig struct {
 	Name         string                 `yaml:"name"`
-	Type         string                 `yaml:"type"` // deterministic, ai, approval
+	Type         string                 `yaml:"type"`   // deterministic, ai, approval
+	Action       string                 `yaml:"action"` // deterministic action name
 	Role         string                 `yaml:"role"`
-	Skill        string                 `yaml:"skill"` // reference to skills/<name>.yaml
+	Skill        string                 `yaml:"skill"`  // reference to skills/<name>.yaml
 	Prompt       string                 `yaml:"prompt"`
-	Vars         map[string]string      `yaml:"vars"`  // variables injected into skill prompt
+	Vars         map[string]string      `yaml:"vars"`   // variables injected into skill prompt
 	Mode         string                 `yaml:"mode"`
 	Channel      string                 `yaml:"channel"`
 	OutputSchema map[string]interface{} `yaml:"output_schema"`
@@ -936,8 +937,57 @@ Description: We need an experienced LLM engineer to build a retrieval-augmented 
 
 		switch step.Type {
 		case "deterministic":
-			// Pass-through for now. In production: fetch, filter, transform.
-			log.Printf("[pipeline:%s][step:%s] deterministic pass-through", pipeline.Name, step.Name)
+			log.Printf("[pipeline:%s][step:%s] action=%s", pipeline.Name, step.Name, step.Action)
+			switch step.Action {
+			case "gmail_unread":
+				if gmail == nil {
+					return fmt.Errorf("[step:%s] gmail connector not configured", step.Name)
+				}
+				emails, err := gmail.FetchUnread(10)
+				if err != nil {
+					return fmt.Errorf("[step:%s] gmail fetch failed: %w", step.Name, err)
+				}
+				if len(emails) == 0 {
+					log.Printf("[pipeline:%s][step:%s] no unread emails, skipping pipeline", pipeline.Name, step.Name)
+					return nil // nothing to report
+				}
+				data["emails"] = FormatEmailsForPrompt(emails)
+				data["email_count"] = fmt.Sprintf("%d", len(emails))
+				// Store for /reply reference
+				lastEmailsMu.Lock()
+				lastEmails = emails
+				lastEmailsMu.Unlock()
+				log.Printf("[pipeline:%s][step:%s] fetched %d unread emails", pipeline.Name, step.Name, len(emails))
+
+			case "notify":
+				// Send ai_output or ai_raw to operator channel
+				msg := ""
+				if output, ok := data["ai_output"]; ok {
+					switch v := output.(type) {
+					case map[string]interface{}:
+						if digest, ok := v["digest"].(string); ok {
+							msg = digest
+						} else {
+							raw, _ := json.Marshal(v)
+							msg = string(raw)
+						}
+					case string:
+						msg = v
+					default:
+						msg = fmt.Sprintf("%v", v)
+					}
+				} else if raw, ok := data["ai_raw"]; ok {
+					msg = fmt.Sprintf("%v", raw)
+				}
+				if msg != "" {
+					count := data["email_count"]
+					header := fmt.Sprintf("[email-digest] %v unread\n\n", count)
+					ch.Send(header + msg)
+				}
+
+			default:
+				// No action — pass-through
+			}
 
 		case "ai":
 			// Budget pre-flight
