@@ -648,7 +648,17 @@ func (t *TGBot) Send(text string) error {
 		"chat_id": t.chatID,
 		"text":    text,
 	})
+	if err != nil {
+		log.Printf("[telegram] Send failed: %v", err)
+	}
 	return err
+}
+
+func (t *TGBot) sendTyping() {
+	t.apiCall("sendChatAction", map[string]interface{}{
+		"chat_id": t.chatID,
+		"action":  "typing",
+	})
 }
 
 // sendWithButtons sends a message with inline keyboard buttons.
@@ -731,12 +741,12 @@ func (t *TGBot) SendForApproval(ctx context.Context, draft string) (OperatorDeci
 					cb := u.CallbackQuery
 					// Security: verify user
 					if !t.isAllowedUser(cb.From.ID) {
-						t.answerCallback(cb.ID, "Access denied.")
+						t.answerCallback(cb.ID, "") // silent drop
 						log.Printf("[security] REJECTED callback from user %d", cb.From.ID)
 						continue
 					}
 					if !t.rateLimiter.allow(cb.From.ID) {
-						t.answerCallback(cb.ID, "Rate limited.")
+						t.answerCallback(cb.ID, "") // silent drop
 						continue
 					}
 					// Must be for our message
@@ -778,7 +788,7 @@ func (t *TGBot) SendForApproval(ctx context.Context, draft string) (OperatorDeci
 					result := validateOperatorInput(u.Message.Text, t.security)
 					if !result.Clean {
 						log.Printf("[security] %s (user: %d)", result.Reason, u.Message.From.ID)
-						t.Send("Input rejected: " + result.Reason)
+						// silent drop — don't tell attacker why input was rejected
 						continue
 					}
 
@@ -827,21 +837,28 @@ type TGCallback struct {
 }
 
 func (t *TGBot) getUpdates() ([]TGUpdate, error) {
-	resp, err := http.Get(fmt.Sprintf(
-		"https://api.telegram.org/bot%s/getUpdates?offset=%d&timeout=1&allowed_updates=%s",
-		t.token, t.offset, `["message","callback_query"]`,
-	))
+	reqBody := map[string]interface{}{
+		"offset":          t.offset,
+		"timeout":         0,
+		"allowed_updates": []string{"message", "callback_query"},
+	}
+	body, _ := json.Marshal(reqBody)
+	resp, err := http.Post(
+		fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates", t.token),
+		"application/json",
+		bytes.NewReader(body),
+	)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	respBody, _ := io.ReadAll(resp.Body)
 
 	var result struct {
 		OK     bool       `json:"ok"`
 		Result []TGUpdate `json:"result"`
 	}
-	json.Unmarshal(body, &result)
+	json.Unmarshal(respBody, &result)
 
 	if len(result.Result) > 0 {
 		t.offset = result.Result[len(result.Result)-1].UpdateID + 1
@@ -1279,69 +1296,46 @@ func main() {
 			return
 
 		case <-ticker.C:
-			// 1. Check for operator commands
+			// 1. Check for operator commands and callbacks
 			updates, err := bot.getUpdates()
 			if err != nil {
 				continue
 			}
 			for _, u := range updates {
-				if u.Message == nil {
-					continue
-				}
-				if u.Message.Chat.ID != bot.chatID {
-					continue
-				}
-				if !bot.isAllowedUser(u.Message.From.ID) {
-					continue
-				}
-
-				text := strings.TrimSpace(u.Message.Text)
-				if strings.HasPrefix(text, "/") {
-					parts := strings.SplitN(text, " ", 2)
-					cmd := parts[0]
-					args := ""
-					if len(parts) > 1 {
-						args = parts[1]
+				// Handle text messages (commands)
+				if u.Message != nil {
+					if u.Message.Chat.ID != bot.chatID {
+						continue
 					}
-					handleCommand(cmd, args, bot, sched, skillReg, &cfg, budget)
+					if !bot.isAllowedUser(u.Message.From.ID) {
+						continue
+					}
+					text := strings.TrimSpace(u.Message.Text)
+					if strings.HasPrefix(text, "/") {
+						parts := strings.SplitN(text, " ", 2)
+						cmd := parts[0]
+						args := ""
+						if len(parts) > 1 {
+							args = parts[1]
+						}
+						log.Printf("[cmd] %s %s (user: %d)", cmd, args, u.Message.From.ID)
+						bot.sendTyping()
+						handleCommand(cmd, args, bot, sched, skillReg, &cfg, budget)
+					} else if text != "" {
+						// Regular message — acknowledge receipt
+						log.Printf("[msg] %q (user: %d)", text, u.Message.From.ID)
+						bot.Send("Commands: /help /cron /skills /run /status")
+					}
 				}
 
-				// Handle callback queries for /cron buttons
+				// Handle callback queries (button clicks) — separate from messages
 				if u.CallbackQuery != nil {
 					cb := u.CallbackQuery
 					if !bot.isAllowedUser(cb.From.ID) {
-						bot.answerCallback(cb.ID, "Access denied.")
+						bot.answerCallback(cb.ID, "") // silent drop
 						continue
 					}
-					if strings.HasPrefix(cb.Data, "cron:") {
-						parts := strings.SplitN(cb.Data, ":", 3)
-						if len(parts) == 3 {
-							switch parts[1] {
-							case "pause":
-								sched.Pause(parts[2])
-								bot.answerCallback(cb.ID, "Paused: "+parts[2])
-								bot.Send(fmt.Sprintf("[cron] Paused: %s", parts[2]))
-							case "resume":
-								sched.Resume(parts[2])
-								bot.answerCallback(cb.ID, "Resumed: "+parts[2])
-								bot.Send(fmt.Sprintf("[cron] Resumed: %s", parts[2]))
-							case "run":
-								bot.answerCallback(cb.ID, "Starting: "+parts[2])
-								handleRun(parts[2], bot, sched, &cfg, budget, skillReg)
-							}
-						}
-					}
-				}
-			}
-
-			// Also check for callback queries in updates
-			for _, u := range updates {
-				if u.CallbackQuery != nil && u.Message == nil {
-					cb := u.CallbackQuery
-					if !bot.isAllowedUser(cb.From.ID) {
-						bot.answerCallback(cb.ID, "Access denied.")
-						continue
-					}
+					log.Printf("[callback] %s (user: %d)", cb.Data, cb.From.ID)
 					if strings.HasPrefix(cb.Data, "cron:") {
 						parts := strings.SplitN(cb.Data, ":", 3)
 						if len(parts) == 3 {
