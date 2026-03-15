@@ -12,5 +12,3 @@ prompt: |
 
   Emails:
   {{emails}}
-output_schema:
-  digest: {type: string}
