@@ -284,7 +284,13 @@ func FormatEmailsForPrompt(emails []Email) string {
 			subject = subject[:80] + "..."
 		}
 
-		sb.WriteString(fmt.Sprintf("%d. %s | %s\n   %s\n", i+1, from, subject, e.Snippet))
+		to := e.To
+		if idx := strings.Index(to, "<"); idx > 0 {
+			to = strings.TrimSpace(to[:idx])
+		}
+		to = strings.Trim(to, "\"")
+
+		sb.WriteString(fmt.Sprintf("%d. From: %s | To: %s | %s\n   %s\n", i+1, from, to, subject, e.Snippet))
 		if i < len(emails)-1 {
 			sb.WriteString("\n")
 		}
