@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
+	"sort"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -275,9 +276,10 @@ func (g *GmailConnector) FetchThread(threadID string) ([]Email, error) {
 	var thread struct {
 		ID       string `json:"id"`
 		Messages []struct {
-			ID      string `json:"id"`
-			Snippet string `json:"snippet"`
-			Payload struct {
+			ID           string `json:"id"`
+			InternalDate string `json:"internalDate"`
+			Snippet      string `json:"snippet"`
+			Payload      struct {
 				Headers []struct {
 					Name  string `json:"name"`
 					Value string `json:"value"`
@@ -297,7 +299,11 @@ func (g *GmailConnector) FetchThread(threadID string) ([]Email, error) {
 	}
 	json.Unmarshal(raw, &thread)
 
-	var emails []Email
+	type msgWithTime struct {
+		email Email
+		epoch int64
+	}
+	var msgsWithTime []msgWithTime
 	for _, msg := range thread.Messages {
 		email := Email{ID: msg.ID, Snippet: msg.Snippet, Labels: msg.LabelIds}
 		for _, h := range msg.Payload.Headers {
@@ -308,10 +314,12 @@ func (g *GmailConnector) FetchThread(threadID string) ([]Email, error) {
 				email.To = h.Value
 			case "Subject":
 				email.Subject = h.Value
-			case "Date":
-				email.Date = h.Value
 			}
 		}
+		// Use internalDate (epoch ms) for accurate chronological ordering
+		var epoch int64
+		fmt.Sscanf(msg.InternalDate, "%d", &epoch)
+		email.Date = time.Unix(epoch/1000, 0).Format("2006-01-02 15:04")
 		// Extract body
 		if len(msg.Payload.Parts) > 0 {
 			for _, part := range msg.Payload.Parts {
@@ -328,7 +336,17 @@ func (g *GmailConnector) FetchThread(threadID string) ([]Email, error) {
 		if len(email.Body) > 500 {
 			email.Body = email.Body[:500] + "..."
 		}
-		emails = append(emails, email)
+		msgsWithTime = append(msgsWithTime, msgWithTime{email: email, epoch: epoch})
+	}
+
+	// Sort chronologically by internalDate
+	sort.Slice(msgsWithTime, func(i, j int) bool {
+		return msgsWithTime[i].epoch < msgsWithTime[j].epoch
+	})
+
+	var emails []Email
+	for _, m := range msgsWithTime {
+		emails = append(emails, m.email)
 	}
 	return emails, nil
 }
