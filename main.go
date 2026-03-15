@@ -463,26 +463,47 @@ func callLLM(ctx context.Context, cfg *Config, role string, prompt string) (*Com
 		},
 		"max_tokens": modelCfg.MaxTokens,
 	}
-	body, _ := json.Marshal(reqBody)
 
-	req, err := http.NewRequestWithContext(ctx, "POST", cfg.Provider.BaseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
+	var respBody []byte
+	var latency int64
+	var lastErr error
+
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			log.Printf("[llm] retry %d after error: %v", attempt, lastErr)
+			time.Sleep(500 * time.Millisecond)
+		}
+
+		body, _ := json.Marshal(reqBody)
+		req, err := http.NewRequestWithContext(ctx, "POST", cfg.Provider.BaseURL+"/chat/completions", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+cfg.Provider.apiKey)
+
+		start := time.Now()
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("LLM request failed: %w", err)
+			continue
+		}
+		latency = time.Since(start).Milliseconds()
+
+		respBody, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode >= 500 {
+			lastErr = fmt.Errorf("LLM API error %d: %s", resp.StatusCode, string(respBody))
+			continue
+		}
+		if resp.StatusCode != 200 {
+			return nil, fmt.Errorf("LLM API error %d: %s", resp.StatusCode, string(respBody))
+		}
+		lastErr = nil
+		break
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+cfg.Provider.apiKey)
-
-	start := time.Now()
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("LLM request failed: %w", err)
-	}
-	defer resp.Body.Close()
-	latency := time.Since(start).Milliseconds()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("LLM API error %d: %s", resp.StatusCode, string(respBody))
+	if lastErr != nil {
+		return nil, lastErr
 	}
 
 	var result struct {
