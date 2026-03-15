@@ -1322,9 +1322,50 @@ func main() {
 						bot.sendTyping()
 						handleCommand(cmd, args, bot, sched, skillReg, &cfg, budget)
 					} else if text != "" {
-						// Regular message — acknowledge receipt
+						// Regular message — respond via LLM
 						log.Printf("[msg] %q (user: %d)", text, u.Message.From.ID)
-						bot.Send("Commands: /help /cron /skills /run /status")
+						bot.sendTyping()
+						if err := budget.check(cfg.Budgets.PerDayTokens, 512); err != nil {
+							bot.Send("Budget limit reached.")
+						} else {
+							aiCtx, aiCancel := context.WithTimeout(context.Background(), 15*time.Second)
+							// Build context about available pipelines and skills
+							var skillList, pipelineList string
+							for _, s := range skillReg.List() {
+								skillList += fmt.Sprintf("\n- %s: %s", s.Name, s.Description)
+							}
+							for _, p := range cfg.Pipelines {
+								pipelineList += fmt.Sprintf("\n- %s (schedule: %s)", p.Name, p.Schedule)
+							}
+							sysPrompt := fmt.Sprintf(`You are aiops, an AI operations assistant running as a Telegram bot.
+You manage automated pipelines and can help the operator with tasks.
+
+Available pipelines:%s
+
+Available skills:%s
+
+Commands the operator can use:
+/cron - view/manage pipeline schedules
+/skills - list skills
+/run <name> - run a pipeline now
+/status - engine status
+
+When the operator asks you to do something you can't do yet (like check emails, read calendar, etc), tell them briefly what connector is needed and that it's on the roadmap. Be direct, concise, no fluff.
+
+Operator: %s`, pipelineList, skillList, text)
+							resp, err := callLLM(aiCtx, &cfg, "drafter", sysPrompt)
+							aiCancel()
+							if err != nil {
+								log.Printf("[msg] LLM error: %v", err)
+								bot.Send("Commands: /help /cron /skills /run /status")
+							} else {
+								budget.record(resp.InputTokens + resp.OutputTokens)
+								log.Printf("[msg] LLM reply (%d tokens, %dms): %s", resp.InputTokens+resp.OutputTokens, resp.LatencyMs, resp.Text[:min(80, len(resp.Text))])
+								if err := bot.Send(resp.Text); err != nil {
+									log.Printf("[msg] Send error: %v", err)
+								}
+							}
+						}
 					}
 				}
 
