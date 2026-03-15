@@ -1396,7 +1396,7 @@ func main() {
 	bot.getUpdates()
 
 	// Startup notification
-	bot.Send("[aiops] Engine started. Send /help for commands.")
+	// No startup message — don't leak that the bot is running to anyone watching the chat
 
 	// Signal handling for graceful shutdown
 	sigCh := make(chan os.Signal, 1)
@@ -1412,7 +1412,7 @@ func main() {
 		select {
 		case sig := <-sigCh:
 			log.Printf("received %s, shutting down", sig)
-			bot.Send("[aiops] Engine stopping.")
+			// silent shutdown — no message
 			return
 
 		case <-ticker.C:
