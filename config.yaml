@@ -13,7 +13,7 @@ telegram:
 
 gmail:
   token_path: /home/debian/.config/google-gmail-token.json
-  permission: read          # read-only, cannot send or draft
+  permission: send          # read + send (with HITL approval)
 
 provider:
   type: openrouter

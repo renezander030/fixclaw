@@ -25,12 +25,13 @@ type GmailConfig struct {
 }
 
 type GmailToken struct {
-	Token        string `json:"token"`
-	RefreshToken string `json:"refresh_token"`
-	TokenURI     string `json:"token_uri"`
-	ClientID     string `json:"client_id"`
-	ClientSecret string `json:"client_secret"`
-	Expiry       string `json:"expiry"`
+	Token        string   `json:"token"`
+	RefreshToken string   `json:"refresh_token"`
+	TokenURI     string   `json:"token_uri"`
+	ClientID     string   `json:"client_id"`
+	ClientSecret string   `json:"client_secret"`
+	Expiry       string   `json:"expiry"`
+	Scopes       []string `json:"scopes"`
 }
 
 type GmailConnector struct {
@@ -98,13 +99,19 @@ func (g *GmailConnector) refreshAccessToken() error {
 	g.accessToken = result.AccessToken
 	g.expiresAt = time.Now().Add(time.Duration(result.ExpiresIn-60) * time.Second)
 
-	// Save refreshed token back
+	// Save refreshed token back — preserve all fields
 	g.token.Token = result.AccessToken
-	tokenData, _ := json.MarshalIndent(g.token, "", "  ")
-	os.WriteFile(g.tokenPath, tokenData, 0600)
+	g.saveToken()
 
 	log.Printf("[gmail] access token refreshed, expires in %ds", result.ExpiresIn)
 	return nil
+}
+
+func (g *GmailConnector) saveToken() {
+	tokenData, _ := json.MarshalIndent(g.token, "", "  ")
+	if err := os.WriteFile(g.tokenPath, tokenData, 0600); err != nil {
+		log.Printf("[gmail] WARNING: failed to save token: %v", err)
+	}
 }
 
 func (g *GmailConnector) ensureToken() error {
@@ -448,18 +455,11 @@ func (g *GmailConnector) ExchangeCode(code string, port int) error {
 	if result.RefreshToken != "" {
 		g.token.RefreshToken = result.RefreshToken
 	}
+	if result.Scope != "" {
+		g.token.Scopes = strings.Split(result.Scope, " ")
+	}
 
-	// Save updated token
-	tokenData, _ := json.MarshalIndent(map[string]interface{}{
-		"token":         g.token.Token,
-		"refresh_token": g.token.RefreshToken,
-		"token_uri":     g.token.TokenURI,
-		"client_id":     g.token.ClientID,
-		"client_secret": g.token.ClientSecret,
-		"scopes": strings.Split(result.Scope, " "),
-	}, "", "  ")
-	os.WriteFile(g.tokenPath, tokenData, 0600)
-
+	g.saveToken()
 	log.Printf("[gmail] re-authorized with scopes: %s", result.Scope)
 	return nil
 }
