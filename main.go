@@ -1223,8 +1223,29 @@ func handleReply(args string, bot *TGBot, cfg *Config, budget *BudgetTracker) {
 	emails := lastEmails
 	lastEmailsMu.Unlock()
 
+	// Auto-fetch if no emails cached
+	if len(emails) == 0 {
+		log.Printf("[reply] no cached emails, auto-fetching...")
+		fetched, err := gmail.FetchRecent("is:unread", 10)
+		if err != nil {
+			bot.Send(fmt.Sprintf("[reply] Failed to fetch emails: %s", err))
+			return
+		}
+		if len(fetched) == 0 {
+			fetched, err = gmail.FetchRecent("", 10)
+			if err != nil {
+				bot.Send(fmt.Sprintf("[reply] Failed to fetch emails: %s", err))
+				return
+			}
+		}
+		lastEmailsMu.Lock()
+		lastEmails = fetched
+		lastEmailsMu.Unlock()
+		emails = fetched
+	}
+
 	if idx > len(emails) {
-		bot.Send(fmt.Sprintf("[reply] Only %d emails in last fetch. Use /emails to refresh.", len(emails)))
+		bot.Send(fmt.Sprintf("[reply] Only %d emails available. Try a lower number.", len(emails)))
 		return
 	}
 
