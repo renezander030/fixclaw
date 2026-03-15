@@ -198,9 +198,10 @@ func (g *GmailConnector) GetMessage(id string) (*Email, error) {
 	}
 
 	var msg struct {
-		ID      string `json:"id"`
-		Snippet string `json:"snippet"`
-		Payload struct {
+		ID           string `json:"id"`
+		InternalDate string `json:"internalDate"`
+		Snippet      string `json:"snippet"`
+		Payload      struct {
 			Headers []struct {
 				Name  string `json:"name"`
 				Value string `json:"value"`
@@ -234,10 +235,13 @@ func (g *GmailConnector) GetMessage(id string) (*Email, error) {
 			email.To = h.Value
 		case "Subject":
 			email.Subject = h.Value
-		case "Date":
-			email.Date = h.Value
 		}
 	}
+
+	// Use internalDate for accurate relative time
+	var epoch int64
+	fmt.Sscanf(msg.InternalDate, "%d", &epoch)
+	email.Date = timeAgo(time.Unix(epoch/1000, 0))
 
 	// Extract body
 	if len(msg.Payload.Parts) > 0 {
@@ -396,12 +400,28 @@ func FormatEmailsForPrompt(emails []Email) string {
 		}
 		to = strings.Trim(to, "\"")
 
-		sb.WriteString(fmt.Sprintf("%d. From: %s | To: %s | %s\n   %s\n", i+1, from, to, subject, e.Snippet))
+		sb.WriteString(fmt.Sprintf("%d. %s | From: %s | To: %s | %s\n   %s\n", i+1, e.Date, from, to, subject, e.Snippet))
 		if i < len(emails)-1 {
 			sb.WriteString("\n")
 		}
 	}
 	return sb.String()
+}
+
+func timeAgo(t time.Time) string {
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	case d < 7*24*time.Hour:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	default:
+		return t.Format("Jan 2")
+	}
 }
 
 // ExtractEmailAddress pulls email from "Name <email>" format
