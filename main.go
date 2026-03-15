@@ -149,6 +149,7 @@ type PipelineState struct {
 	Name     string
 	Schedule string
 	Paused   bool
+	Running  bool
 	LastRun  time.Time
 	NextRun  time.Time
 }
@@ -237,13 +238,21 @@ func (s *Scheduler) MarkRun(name string) {
 	}
 }
 
+func (s *Scheduler) SetRunning(name string, running bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ps, ok := s.pipelines[name]; ok {
+		ps.Running = running
+	}
+}
+
 func (s *Scheduler) GetDue() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var due []string
 	now := time.Now()
 	for name, ps := range s.pipelines {
-		if ps.Paused || ps.Schedule == "manual" || ps.Schedule == "" {
+		if ps.Paused || ps.Running || ps.Schedule == "manual" || ps.Schedule == "" {
 			continue
 		}
 		if !ps.NextRun.IsZero() && now.After(ps.NextRun) {
@@ -652,9 +661,12 @@ type TGBot struct {
 	rateLimiter *RateLimiter
 }
 
+// tgClient — dedicated HTTP client for Telegram API with timeouts
+var tgClient = &http.Client{Timeout: 10 * time.Second}
+
 func (t *TGBot) apiCall(method string, payload map[string]interface{}) (json.RawMessage, error) {
 	body, _ := json.Marshal(payload)
-	resp, err := http.Post(
+	resp, err := tgClient.Post(
 		fmt.Sprintf("https://api.telegram.org/bot%s/%s", t.token, method),
 		"application/json",
 		bytes.NewReader(body),
@@ -877,7 +889,7 @@ func (t *TGBot) getUpdates() ([]TGUpdate, error) {
 		"allowed_updates": []string{"message", "callback_query"},
 	}
 	body, _ := json.Marshal(reqBody)
-	resp, err := http.Post(
+	resp, err := tgClient.Post(
 		fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates", t.token),
 		"application/json",
 		bytes.NewReader(body),
@@ -1693,7 +1705,9 @@ func handleRun(args string, bot *TGBot, sched *Scheduler, cfg *Config, budget *B
 		return
 	}
 	bot.Send(fmt.Sprintf("[run] Starting: %s", name))
+	sched.SetRunning(name, true)
 	go func() {
+		defer sched.SetRunning(name, false)
 		if err := runPipeline(cfg, *pipeline, budget, bot, skills); err != nil {
 			log.Printf("[run] pipeline %s error: %v", name, err)
 			bot.Send(fmt.Sprintf("[run] ERROR in %s: %s", name, err))
@@ -2023,7 +2037,9 @@ Conversation so far:
 				for i := range cfg.Pipelines {
 					if cfg.Pipelines[i].Name == name {
 						log.Printf("[scheduler] running due pipeline: %s", name)
+						sched.SetRunning(name, true)
 						go func(p PipelineConfig) {
+							defer sched.SetRunning(p.Name, false)
 							if err := runPipeline(&cfg, p, budget, bot, skillReg); err != nil {
 								log.Printf("[scheduler] pipeline %s error: %v", p.Name, err)
 								bot.Send(fmt.Sprintf("[aiops] ERROR in %s: %s", p.Name, err))

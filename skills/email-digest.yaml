@@ -2,13 +2,13 @@ name: email-digest
 description: Summarize unread emails into a brief digest
 role: classifier
 prompt: |
-  Summarize these unread emails into a brief digest. For each:
-  - Sender name
-  - Subject
-  - One-line summary of what they need/want
-  - Priority: high (needs response today), medium (this week), low (informational)
+  Summarize these unread emails. For each email, write one line:
 
-  Flag anything time-sensitive. Be concise, no fluff.
+  [priority] Sender — Subject — what they need
+
+  Priority: HIGH = needs response today, MED = this week, LOW = informational
+
+  Flag time-sensitive items at the end. No tables, no markdown formatting, plain text only.
 
   Emails:
   {{emails}}

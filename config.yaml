@@ -33,8 +33,8 @@ models:
     cost_per_1k_output: 0.0006
 
 roles:
-  classifier: haiku
-  drafter: haiku
+  classifier: gpt-4o-mini
+  drafter: gpt-4o-mini
 
 budgets:
   per_step_tokens: 2048
