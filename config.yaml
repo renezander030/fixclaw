@@ -11,6 +11,10 @@ telegram:
     rate_limit: 10                # max messages per minute per user
     strip_markdown: true          # strip formatting that could break prompt boundaries
 
+gmail:
+  token_path: /home/debian/.config/google-gmail-token.json
+  permission: read          # read-only, cannot send or draft
+
 provider:
   type: openrouter
   api_key_env: OPENROUTER_API_KEY

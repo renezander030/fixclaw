@@ -22,13 +22,14 @@ import (
 // --- Config ---
 
 type Config struct {
-	Telegram TelegramConfig         `yaml:"telegram"`
-	Provider ProviderConfig         `yaml:"provider"`
-	Models   map[string]ModelConfig `yaml:"models"`
-	Roles    map[string]string      `yaml:"roles"`
-	Budgets  BudgetConfig           `yaml:"budgets"`
-	Timeouts TimeoutConfig          `yaml:"timeouts"`
-	Pipelines []PipelineConfig      `yaml:"pipelines"`
+	Telegram    TelegramConfig         `yaml:"telegram"`
+	Gmail       GmailConfig            `yaml:"gmail"`
+	Provider    ProviderConfig         `yaml:"provider"`
+	Models      map[string]ModelConfig `yaml:"models"`
+	Roles       map[string]string      `yaml:"roles"`
+	Budgets     BudgetConfig           `yaml:"budgets"`
+	Timeouts    TimeoutConfig          `yaml:"timeouts"`
+	Pipelines   []PipelineConfig       `yaml:"pipelines"`
 }
 
 type TelegramConfig struct {
@@ -1061,6 +1062,8 @@ Description: We need an experienced LLM engineer to build a retrieval-augmented 
 // --- Command Handler ---
 // Handles operator commands like /cron, /skills, /run, /status
 
+var gmail *GmailConnector // initialized in main if configured
+
 func handleCommand(cmd string, args string, bot *TGBot, sched *Scheduler, skills *SkillRegistry, cfg *Config, budget *BudgetTracker) {
 	switch cmd {
 	case "/cron":
@@ -1071,8 +1074,60 @@ func handleCommand(cmd string, args string, bot *TGBot, sched *Scheduler, skills
 		handleRun(args, bot, sched, cfg, budget, skills)
 	case "/status":
 		handleStatus(bot, budget, sched)
+	case "/emails":
+		handleEmails(args, bot, cfg, budget)
 	case "/help":
-		bot.Send("Commands:\n/cron - View and manage pipeline schedules\n/skills - List available skills\n/run <pipeline> - Run a pipeline now\n/status - Engine status and token usage")
+		bot.Send("Commands:\n/emails [query] - Check emails\n/cron - Manage pipeline schedules\n/skills - List skills\n/run <pipeline> - Run a pipeline now\n/status - Engine status")
+	}
+}
+
+func handleEmails(args string, bot *TGBot, cfg *Config, budget *BudgetTracker) {
+	if gmail == nil {
+		bot.Send("[emails] Gmail connector not configured.")
+		return
+	}
+	query := strings.TrimSpace(args)
+	if query == "" {
+		query = "is:unread"
+	}
+	maxResults := 5
+
+	emails, err := gmail.FetchRecent(query, maxResults)
+	if err != nil {
+		log.Printf("[emails] fetch error: %v", err)
+		bot.Send(fmt.Sprintf("[emails] Error: %s", err))
+		return
+	}
+
+	if len(emails) == 0 {
+		bot.Send("[emails] No emails found for: " + query)
+		return
+	}
+
+	// Format and send
+	formatted := FormatEmailsForPrompt(emails)
+	header := fmt.Sprintf("[emails] %d result(s) for: %s\n\n", len(emails), query)
+
+	// If short enough, send directly. Otherwise summarize with LLM.
+	if len(formatted) < 3000 {
+		bot.Send(header + formatted)
+	} else {
+		// Use LLM to summarize
+		if err := budget.check(cfg.Budgets.PerDayTokens, 1024); err != nil {
+			bot.Send(header + formatted[:2000] + "\n\n[truncated]")
+			return
+		}
+		bot.sendTyping()
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		resp, err := callLLM(ctx, cfg, "classifier", fmt.Sprintf(
+			"Summarize these emails in a brief list. For each: sender, subject, 1-line summary. Be concise.\n\n%s", formatted))
+		cancel()
+		if err != nil {
+			bot.Send(header + formatted[:2000] + "\n\n[truncated]")
+		} else {
+			budget.record(resp.InputTokens + resp.OutputTokens)
+			bot.Send(header + resp.Text)
+		}
 	}
 }
 
@@ -1258,6 +1313,15 @@ func main() {
 	}
 	skillReg, _ := loadSkills(skillsDir)
 
+	// Init Gmail connector if configured
+	if cfg.Gmail.TokenPath != "" {
+		var err error
+		gmail, err = NewGmailConnector(cfg.Gmail.TokenPath)
+		if err != nil {
+			log.Printf("[gmail] WARNING: failed to initialize: %v", err)
+		}
+	}
+
 	// Init scheduler
 	sched := newScheduler(cfg.Pipelines)
 
@@ -1322,9 +1386,17 @@ func main() {
 						bot.sendTyping()
 						handleCommand(cmd, args, bot, sched, skillReg, &cfg, budget)
 					} else if text != "" {
-						// Regular message — respond via LLM
 						log.Printf("[msg] %q (user: %d)", text, u.Message.From.ID)
 						bot.sendTyping()
+
+						// Intent detection — handle common requests directly
+						lower := strings.ToLower(text)
+						if gmail != nil && (strings.Contains(lower, "email") || strings.Contains(lower, "inbox") || strings.Contains(lower, "mail") || strings.Contains(lower, "unread")) {
+							handleEmails("", bot, &cfg, budget)
+							continue
+						}
+
+						// Regular message — respond via LLM
 						if err := budget.check(cfg.Budgets.PerDayTokens, 512); err != nil {
 							bot.Send("Budget limit reached.")
 						} else {
@@ -1337,6 +1409,10 @@ func main() {
 							for _, p := range cfg.Pipelines {
 								pipelineList += fmt.Sprintf("\n- %s (schedule: %s)", p.Name, p.Schedule)
 							}
+							gmailStatus := "not configured"
+							if gmail != nil {
+								gmailStatus = "connected (read-only)"
+							}
 							sysPrompt := fmt.Sprintf(`You are aiops, an AI operations assistant running as a Telegram bot.
 You manage automated pipelines and can help the operator with tasks.
 
@@ -1344,15 +1420,19 @@ Available pipelines:%s
 
 Available skills:%s
 
+Connectors:
+- Gmail: %s
+
 Commands the operator can use:
+/emails [query] - check emails (unread by default, or custom query)
 /cron - view/manage pipeline schedules
 /skills - list skills
 /run <name> - run a pipeline now
 /status - engine status
 
-When the operator asks you to do something you can't do yet (like check emails, read calendar, etc), tell them briefly what connector is needed and that it's on the roadmap. Be direct, concise, no fluff.
+When the operator asks about emails, tell them to use /emails. When they ask for features not yet available (calendar, Slack, etc), say briefly what's needed and that it's on the roadmap. Be direct, concise, no fluff.
 
-Operator: %s`, pipelineList, skillList, text)
+Operator: %s`, pipelineList, skillList, gmailStatus, text)
 							resp, err := callLLM(aiCtx, &cfg, "drafter", sysPrompt)
 							aiCancel()
 							if err != nil {
