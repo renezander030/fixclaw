@@ -1,0 +1,4 @@
+aiops
+*.env
+*.key
+*.secret

@@ -1,0 +1,73 @@
+# aiops configuration
+# Operator channel, LLM provider, guardrails, pipelines
+
+telegram:
+  token_env: AIOPS_TG_TOKEN
+  chat_id: 525240338
+  # REQUIRED — engine refuses to start without this
+  security:
+    allowed_users: [525240338]    # TG user IDs that may interact (Rene)
+    max_input_length: 500         # max chars per operator message
+    rate_limit: 10                # max messages per minute per user
+    strip_markdown: true          # strip formatting that could break prompt boundaries
+
+provider:
+  type: openrouter
+  api_key_env: OPENROUTER_API_KEY
+  base_url: https://openrouter.ai/api/v1
+
+models:
+  haiku:
+    model: anthropic/claude-haiku-4-5
+    max_tokens: 1024
+    cost_per_1k_input: 0.001
+    cost_per_1k_output: 0.005
+  gpt-4o-mini:
+    model: openai/gpt-4o-mini
+    max_tokens: 1024
+    cost_per_1k_input: 0.00015
+    cost_per_1k_output: 0.0006
+
+roles:
+  classifier: haiku
+  drafter: haiku
+
+budgets:
+  per_step_tokens: 2048
+  per_pipeline_tokens: 10000
+  per_day_tokens: 100000
+
+timeouts:
+  ai_call: 30s
+  operator_approval: 4h
+  pipeline_total: 5m
+
+pipelines:
+  - name: test-screener
+    schedule: manual
+    steps:
+      - name: mock-input
+        type: deterministic
+
+      - name: classify
+        type: ai
+        role: classifier
+        prompt: |
+          Score this job 1-5 for a freelancer with skills: AI/LLM, TypeScript, Go, cloud infra. Rate minimum: $60/hr.
+
+          Job: {{input}}
+
+          Respond with ONLY valid JSON:
+          {"score": <1-5>, "reason": "<one line>", "reject": <true/false>}
+        output_schema:
+          score: {type: int, min: 1, max: 5}
+          reason: {type: string}
+          reject: {type: bool}
+
+      - name: review
+        type: approval
+        mode: hitl
+        channel: telegram
+
+      - name: log-result
+        type: deterministic
