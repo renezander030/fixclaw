@@ -446,6 +446,17 @@ type CompletionResponse struct {
 	Model        string
 }
 
+// httpClient with connection settings tuned for flaky providers
+var httpClient = &http.Client{
+	Transport: &http.Transport{
+		MaxIdleConns:        10,
+		IdleConnTimeout:     30 * time.Second,
+		DisableKeepAlives:   true, // fresh connection per request — avoids stale connection EOF
+		TLSHandshakeTimeout: 10 * time.Second,
+	},
+	Timeout: 30 * time.Second,
+}
+
 func callLLM(ctx context.Context, cfg *Config, role string, prompt string) (*CompletionResponse, error) {
 	modelName, ok := cfg.Roles[role]
 	if !ok {
@@ -483,7 +494,7 @@ func callLLM(ctx context.Context, cfg *Config, role string, prompt string) (*Com
 		req.Header.Set("Authorization", "Bearer "+cfg.Provider.apiKey)
 
 		start := time.Now()
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := httpClient.Do(req)
 		if err != nil {
 			lastErr = fmt.Errorf("LLM request failed: %w", err)
 			continue
