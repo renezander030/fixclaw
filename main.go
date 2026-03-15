@@ -468,10 +468,10 @@ func callLLM(ctx context.Context, cfg *Config, role string, prompt string) (*Com
 	var latency int64
 	var lastErr error
 
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
 			log.Printf("[llm] retry %d after error: %v", attempt, lastErr)
-			time.Sleep(500 * time.Millisecond)
+			time.Sleep(time.Duration(attempt) * time.Second)
 		}
 
 		body, _ := json.Marshal(reqBody)
