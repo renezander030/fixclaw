@@ -1137,6 +1137,8 @@ func handleCommand(cmd string, args string, bot *TGBot, sched *Scheduler, skills
 		handleReply(args, bot, cfg, budget)
 	case "/reauth":
 		handleReauth(bot)
+	case "/authcode":
+		handleAuthCode(args, bot)
 	case "/help":
 		bot.Send("Commands:\n/emails [query] - Check emails\n/reply <number> [text] - Reply to an email\n/cron - Manage pipeline schedules\n/skills - List skills\n/run <pipeline> - Run a pipeline now\n/status - Engine status")
 	}
@@ -1320,6 +1322,8 @@ Body:
 	}
 }
 
+const authRedirectPort = 9999
+
 func handleReauth(bot *TGBot) {
 	if gmail == nil {
 		bot.Send("[reauth] Gmail connector not configured.")
@@ -1330,8 +1334,26 @@ func handleReauth(bot *TGBot) {
 		"https://www.googleapis.com/auth/gmail.send",
 		"https://www.googleapis.com/auth/gmail.compose",
 	}
-	authURL := GenerateAuthURL(gmail.token.ClientID, scopes)
-	bot.Send(fmt.Sprintf("[reauth] Open this URL to grant send/compose permissions:\n\n%s\n\nAfter authorizing, send me the code with: /authcode <code>", authURL))
+	authURL := GenerateAuthURL(gmail.token.ClientID, scopes, authRedirectPort)
+	bot.Send(fmt.Sprintf("[reauth] Open this URL:\n\n%s\n\nAfter authorizing, the page will fail to load. Copy the 'code' parameter from the URL bar and send:\n/authcode <the-code>", authURL))
+}
+
+func handleAuthCode(args string, bot *TGBot) {
+	code := strings.TrimSpace(args)
+	if code == "" {
+		bot.Send("[authcode] Usage: /authcode <code>")
+		return
+	}
+	if gmail == nil {
+		bot.Send("[authcode] Gmail connector not configured.")
+		return
+	}
+	err := gmail.ExchangeCode(code, authRedirectPort)
+	if err != nil {
+		bot.Send(fmt.Sprintf("[authcode] Failed: %s", err))
+		return
+	}
+	bot.Send("[authcode] Success. Gmail now has send/compose permissions.")
 }
 
 func handleCron(args string, bot *TGBot, sched *Scheduler) {

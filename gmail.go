@@ -400,15 +400,99 @@ func (g *GmailConnector) GetFullMessage(id string) (*Email, string, string, stri
 	return &email, msg.ThreadId, messageID, references, nil
 }
 
-// GenerateAuthURL generates an OAuth consent URL for re-authorization with new scopes
-func GenerateAuthURL(clientID string, scopes []string) string {
+// GenerateAuthURL generates an OAuth consent URL with localhost redirect
+func GenerateAuthURL(clientID string, scopes []string, port int) string {
 	params := url.Values{
 		"client_id":     {clientID},
-		"redirect_uri":  {"urn:ietf:wg:oauth:2.0:oob"},
+		"redirect_uri":  {fmt.Sprintf("http://localhost:%d", port)},
 		"response_type": {"code"},
 		"scope":         {strings.Join(scopes, " ")},
 		"access_type":   {"offline"},
 		"prompt":        {"consent"},
 	}
 	return "https://accounts.google.com/o/oauth2/v2/auth?" + params.Encode()
+}
+
+// ExchangeCode exchanges an auth code for tokens and saves them
+func (g *GmailConnector) ExchangeCode(code string, port int) error {
+	data := url.Values{
+		"client_id":     {g.token.ClientID},
+		"client_secret": {g.token.ClientSecret},
+		"code":          {code},
+		"grant_type":    {"authorization_code"},
+		"redirect_uri":  {fmt.Sprintf("http://localhost:%d", port)},
+	}
+	resp, err := http.PostForm(g.token.TokenURI, data)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	var result struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int    `json:"expires_in"`
+		Scope        string `json:"scope"`
+		Error        string `json:"error"`
+		ErrorDesc    string `json:"error_description"`
+	}
+	json.Unmarshal(body, &result)
+	if result.Error != "" {
+		return fmt.Errorf("%s: %s", result.Error, result.ErrorDesc)
+	}
+
+	g.accessToken = result.AccessToken
+	g.expiresAt = time.Now().Add(time.Duration(result.ExpiresIn-60) * time.Second)
+	g.token.Token = result.AccessToken
+	if result.RefreshToken != "" {
+		g.token.RefreshToken = result.RefreshToken
+	}
+
+	// Save updated token
+	tokenData, _ := json.MarshalIndent(map[string]interface{}{
+		"token":         g.token.Token,
+		"refresh_token": g.token.RefreshToken,
+		"token_uri":     g.token.TokenURI,
+		"client_id":     g.token.ClientID,
+		"client_secret": g.token.ClientSecret,
+		"scopes": strings.Split(result.Scope, " "),
+	}, "", "  ")
+	os.WriteFile(g.tokenPath, tokenData, 0600)
+
+	log.Printf("[gmail] re-authorized with scopes: %s", result.Scope)
+	return nil
+}
+
+// StartAuthCallback starts a temporary HTTP server to catch the OAuth redirect.
+// Returns the auth code via the channel, then shuts down.
+func StartAuthCallback(port int) chan string {
+	codeCh := make(chan string, 1)
+
+	srv := &http.Server{Addr: fmt.Sprintf(":%d", port)}
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		code := r.URL.Query().Get("code")
+		if code != "" {
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprint(w, "<h2>Authorization successful</h2><p>You can close this tab.</p>")
+			codeCh <- code
+			go func() {
+				time.Sleep(1 * time.Second)
+				srv.Close()
+			}()
+		} else {
+			errMsg := r.URL.Query().Get("error")
+			fmt.Fprintf(w, "Error: %s", errMsg)
+			codeCh <- ""
+			go srv.Close()
+		}
+	})
+
+	go func() {
+		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+			log.Printf("[auth] callback server error: %v", err)
+		}
+	}()
+
+	return codeCh
 }
