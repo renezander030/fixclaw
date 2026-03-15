@@ -108,7 +108,25 @@ func (g *GmailConnector) refreshAccessToken() error {
 }
 
 func (g *GmailConnector) saveToken() {
-	tokenData, _ := json.MarshalIndent(g.token, "", "  ")
+	// Read existing file first to preserve fields we don't track (e.g. scopes from prior auth)
+	existing := make(map[string]interface{})
+	if data, err := os.ReadFile(g.tokenPath); err == nil {
+		json.Unmarshal(data, &existing)
+	}
+
+	// Update only the fields we manage
+	existing["token"] = g.token.Token
+	existing["refresh_token"] = g.token.RefreshToken
+	existing["token_uri"] = g.token.TokenURI
+	existing["client_id"] = g.token.ClientID
+	existing["client_secret"] = g.token.ClientSecret
+
+	// Only write scopes if we have them (from ExchangeCode)
+	if len(g.token.Scopes) > 0 {
+		existing["scopes"] = g.token.Scopes
+	}
+
+	tokenData, _ := json.MarshalIndent(existing, "", "  ")
 	if err := os.WriteFile(g.tokenPath, tokenData, 0600); err != nil {
 		log.Printf("[gmail] WARNING: failed to save token: %v", err)
 	}
