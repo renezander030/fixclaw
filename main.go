@@ -1156,6 +1156,8 @@ func handleCommand(cmd string, args string, bot *TGBot, sched *Scheduler, skills
 		handleEmails(args, bot, cfg, budget)
 	case "/reply":
 		handleReply(args, bot, cfg, budget)
+	case "/thread":
+		handleThread(args, bot, cfg, budget)
 	case "/reauth":
 		handleReauth(bot)
 	case "/authcode":
@@ -1400,6 +1402,87 @@ Body:
 }
 
 const authRedirectPort = 9999
+
+func handleThread(args string, bot *TGBot, cfg *Config, budget *BudgetTracker) {
+	if gmail == nil {
+		bot.Send("[thread] Gmail connector not configured.")
+		return
+	}
+
+	parts := strings.Fields(args)
+	if len(parts) == 0 || parts[0] == "" {
+		bot.Send("[thread] Usage: /thread <number> — show full conversation for email N from last fetch")
+		return
+	}
+
+	idx := 0
+	fmt.Sscanf(parts[0], "%d", &idx)
+	if idx < 1 {
+		idx = 1
+	}
+
+	lastEmailsMu.Lock()
+	emails := lastEmails
+	lastEmailsMu.Unlock()
+
+	// Auto-fetch if empty
+	if len(emails) == 0 {
+		fetched, err := gmail.FetchRecent("", 10)
+		if err != nil {
+			bot.Send(fmt.Sprintf("[thread] Failed to fetch emails: %s", err))
+			return
+		}
+		lastEmailsMu.Lock()
+		lastEmails = fetched
+		lastEmailsMu.Unlock()
+		emails = fetched
+	}
+
+	if idx > len(emails) {
+		bot.Send(fmt.Sprintf("[thread] Only %d emails available.", len(emails)))
+		return
+	}
+
+	target := emails[idx-1]
+
+	// Get thread ID
+	_, threadID, _, _, err := gmail.GetFullMessage(target.ID)
+	if err != nil {
+		bot.Send(fmt.Sprintf("[thread] Failed: %s", err))
+		return
+	}
+
+	// Fetch full thread
+	bot.sendTyping()
+	threadEmails, err := gmail.FetchThread(threadID)
+	if err != nil {
+		bot.Send(fmt.Sprintf("[thread] Failed to fetch thread: %s", err))
+		return
+	}
+
+	threadText := FormatThreadForPrompt(threadEmails, "rio@ramaris.app")
+
+	// Summarize with LLM
+	if err := budget.check(cfg.Budgets.PerDayTokens, 2048); err != nil {
+		// No budget — send raw
+		bot.Send(fmt.Sprintf("[thread] %d messages in thread:\n\n%s", len(threadEmails), threadText[:min(3500, len(threadText))]))
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	prompt := fmt.Sprintf(`Summarize this email thread. Show the back-and-forth between sent and received messages. Include key points, decisions, and any action items. Be concise.
+
+Thread (%d messages):
+%s`, len(threadEmails), threadText)
+	resp, err := callLLM(ctx, cfg, "classifier", prompt)
+	cancel()
+	if err != nil {
+		bot.Send(fmt.Sprintf("[thread] %d messages:\n\n%s", len(threadEmails), threadText[:min(3500, len(threadText))]))
+		return
+	}
+	budget.record(resp.InputTokens + resp.OutputTokens)
+	bot.Send(fmt.Sprintf("[thread] %d messages — %s\n\n%s", len(threadEmails), target.Subject, resp.Text))
+}
 
 func handleReauth(bot *TGBot) {
 	if gmail == nil {
@@ -1719,6 +1802,7 @@ Message: %s
 Intents:
 - Read/check/fetch/search emails (inbox, sent, from someone): {"intent":"emails","query":"<gmail query or empty>"}
 - Reply/respond/send to an email: {"intent":"reply","number":<1-based index>,"body":"<reply text or empty for AI draft>"}
+- View full conversation/thread/history for an email: {"intent":"thread","number":<1-based index>}
 - Anything else (questions, conversation, commands): {"intent":"chat"}
 
 Rules:
@@ -1772,6 +1856,13 @@ Rules:
 											args += " " + intent.Body
 										}
 										handleReply(args, bot, &cfg, budget)
+										continue
+									case "thread":
+										num := intent.Number
+										if num == 0 {
+											num = 1
+										}
+										handleThread(fmt.Sprintf("%d", num), bot, &cfg, budget)
 										continue
 									}
 									// "chat" falls through to LLM chat below

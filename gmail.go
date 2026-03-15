@@ -265,6 +265,94 @@ func (g *GmailConnector) FetchUnread(maxResults int) ([]Email, error) {
 	return g.FetchRecent("is:unread", maxResults)
 }
 
+// FetchThread fetches all messages in a thread (sent + received), ordered chronologically
+func (g *GmailConnector) FetchThread(threadID string) ([]Email, error) {
+	raw, err := g.apiGet("threads/" + threadID + "?format=full")
+	if err != nil {
+		return nil, err
+	}
+
+	var thread struct {
+		ID       string `json:"id"`
+		Messages []struct {
+			ID      string `json:"id"`
+			Snippet string `json:"snippet"`
+			Payload struct {
+				Headers []struct {
+					Name  string `json:"name"`
+					Value string `json:"value"`
+				} `json:"headers"`
+				Parts []struct {
+					MimeType string `json:"mimeType"`
+					Body     struct {
+						Data string `json:"data"`
+					} `json:"body"`
+				} `json:"parts"`
+				Body struct {
+					Data string `json:"data"`
+				} `json:"body"`
+			} `json:"payload"`
+			LabelIds []string `json:"labelIds"`
+		} `json:"messages"`
+	}
+	json.Unmarshal(raw, &thread)
+
+	var emails []Email
+	for _, msg := range thread.Messages {
+		email := Email{ID: msg.ID, Snippet: msg.Snippet, Labels: msg.LabelIds}
+		for _, h := range msg.Payload.Headers {
+			switch h.Name {
+			case "From":
+				email.From = h.Value
+			case "To":
+				email.To = h.Value
+			case "Subject":
+				email.Subject = h.Value
+			case "Date":
+				email.Date = h.Value
+			}
+		}
+		// Extract body
+		if len(msg.Payload.Parts) > 0 {
+			for _, part := range msg.Payload.Parts {
+				if part.MimeType == "text/plain" && part.Body.Data != "" {
+					decoded, _ := base64.URLEncoding.DecodeString(part.Body.Data)
+					email.Body = string(decoded)
+					break
+				}
+			}
+		} else if msg.Payload.Body.Data != "" {
+			decoded, _ := base64.URLEncoding.DecodeString(msg.Payload.Body.Data)
+			email.Body = string(decoded)
+		}
+		if len(email.Body) > 500 {
+			email.Body = email.Body[:500] + "..."
+		}
+		emails = append(emails, email)
+	}
+	return emails, nil
+}
+
+// FormatThreadForPrompt formats a thread as a conversation for LLM summarization
+func FormatThreadForPrompt(emails []Email, myAddress string) string {
+	var sb strings.Builder
+	for _, e := range emails {
+		direction := "RECEIVED"
+		fromAddr := ExtractEmailAddress(e.From)
+		if strings.EqualFold(fromAddr, myAddress) {
+			direction = "SENT"
+		}
+		from := e.From
+		if idx := strings.Index(from, "<"); idx > 0 {
+			from = strings.TrimSpace(from[:idx])
+		}
+		from = strings.Trim(from, "\"")
+
+		sb.WriteString(fmt.Sprintf("[%s] %s — %s\n%s\n\n", direction, from, e.Date, e.Body))
+	}
+	return sb.String()
+}
+
 // FormatForPrompt turns emails into a compact string for LLM consumption
 func FormatEmailsForPrompt(emails []Email) string {
 	if len(emails) == 0 {
