@@ -1062,7 +1062,9 @@ Description: We need an experienced LLM engineer to build a retrieval-augmented 
 // --- Command Handler ---
 // Handles operator commands like /cron, /skills, /run, /status
 
-var gmail *GmailConnector // initialized in main if configured
+var gmail *GmailConnector       // initialized in main if configured
+var lastEmails []Email          // last fetched emails for /reply reference
+var lastEmailsMu sync.Mutex
 
 // --- Chat History ---
 // Per-chat conversation buffer. Keeps last N turns for context.
@@ -1131,8 +1133,12 @@ func handleCommand(cmd string, args string, bot *TGBot, sched *Scheduler, skills
 		handleStatus(bot, budget, sched)
 	case "/emails":
 		handleEmails(args, bot, cfg, budget)
+	case "/reply":
+		handleReply(args, bot, cfg, budget)
+	case "/reauth":
+		handleReauth(bot)
 	case "/help":
-		bot.Send("Commands:\n/emails [query] - Check emails\n/cron - Manage pipeline schedules\n/skills - List skills\n/run <pipeline> - Run a pipeline now\n/status - Engine status")
+		bot.Send("Commands:\n/emails [query] - Check emails\n/reply <number> [text] - Reply to an email\n/cron - Manage pipeline schedules\n/skills - List skills\n/run <pipeline> - Run a pipeline now\n/status - Engine status")
 	}
 }
 
@@ -1153,6 +1159,11 @@ func handleEmails(args string, bot *TGBot, cfg *Config, budget *BudgetTracker) {
 		bot.Send(fmt.Sprintf("[emails] Error: %s", err))
 		return
 	}
+
+	// Store for /reply reference
+	lastEmailsMu.Lock()
+	lastEmails = emails
+	lastEmailsMu.Unlock()
 
 	if len(emails) == 0 {
 		bot.Send("[emails] No emails found for: " + query)
@@ -1184,6 +1195,143 @@ func handleEmails(args string, bot *TGBot, cfg *Config, budget *BudgetTracker) {
 			bot.Send(header + resp.Text)
 		}
 	}
+}
+
+func handleReply(args string, bot *TGBot, cfg *Config, budget *BudgetTracker) {
+	if gmail == nil {
+		bot.Send("[reply] Gmail connector not configured.")
+		return
+	}
+
+	parts := strings.SplitN(strings.TrimSpace(args), " ", 2)
+	if len(parts) == 0 || parts[0] == "" {
+		bot.Send("[reply] Usage: /reply <number> [your reply text]\nOr: /reply <number> (AI drafts a reply)")
+		return
+	}
+
+	// Parse email number
+	idx := 0
+	fmt.Sscanf(parts[0], "%d", &idx)
+	if idx < 1 {
+		bot.Send("[reply] Invalid email number. Use /emails first, then /reply 1")
+		return
+	}
+
+	lastEmailsMu.Lock()
+	emails := lastEmails
+	lastEmailsMu.Unlock()
+
+	if idx > len(emails) {
+		bot.Send(fmt.Sprintf("[reply] Only %d emails in last fetch. Use /emails to refresh.", len(emails)))
+		return
+	}
+
+	target := emails[idx-1]
+
+	// Get full message with thread info for proper reply
+	fullEmail, threadID, messageID, references, err := gmail.GetFullMessage(target.ID)
+	if err != nil {
+		bot.Send(fmt.Sprintf("[reply] Failed to fetch email: %s", err))
+		return
+	}
+
+	replyTo := ExtractEmailAddress(fullEmail.From)
+	subject := fullEmail.Subject
+
+	var replyBody string
+
+	if len(parts) > 1 && parts[1] != "" {
+		// User provided reply text directly
+		replyBody = parts[1]
+	} else {
+		// AI drafts a reply
+		bot.sendTyping()
+		if err := budget.check(cfg.Budgets.PerDayTokens, 1024); err != nil {
+			bot.Send("[reply] Budget limit reached.")
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		prompt := fmt.Sprintf(`Draft a brief, professional reply to this email. Just the reply body, no subject line or headers.
+
+From: %s
+Subject: %s
+Body:
+%s`, fullEmail.From, fullEmail.Subject, fullEmail.Body)
+		resp, err := callLLM(ctx, cfg, "drafter", prompt)
+		cancel()
+		if err != nil {
+			bot.Send(fmt.Sprintf("[reply] Draft failed: %s", err))
+			return
+		}
+		budget.record(resp.InputTokens + resp.OutputTokens)
+		replyBody = resp.Text
+	}
+
+	// Show draft for HITL approval
+	draft := fmt.Sprintf("[reply] Draft reply to: %s\nSubject: Re: %s\n\n%s", replyTo, subject, replyBody)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Hour)
+	decision, err := bot.SendForApproval(ctx, draft)
+	cancel()
+	if err != nil {
+		log.Printf("[reply] approval error: %v", err)
+		return
+	}
+
+	switch decision.Action {
+	case "approve":
+		// Build references chain
+		refs := references
+		if refs != "" {
+			refs += " " + messageID
+		} else {
+			refs = messageID
+		}
+
+		// Try send, fall back to draft
+		if cfg.Gmail.Permission == "send" {
+			err = gmail.SendReply(replyTo, subject, messageID, refs, threadID, replyBody)
+			if err != nil {
+				log.Printf("[reply] send failed: %v", err)
+				bot.Send(fmt.Sprintf("[reply] Send failed: %s\nTrying to save as draft...", err))
+				err = gmail.CreateDraft(replyTo, subject, messageID, refs, threadID, replyBody)
+			}
+		} else {
+			err = gmail.CreateDraft(replyTo, subject, messageID, refs, threadID, replyBody)
+		}
+
+		if err != nil {
+			bot.Send(fmt.Sprintf("[reply] Failed: %s\nYou may need to /reauth with broader scopes.", err))
+		} else {
+			action := "Saved as draft"
+			if cfg.Gmail.Permission == "send" {
+				action = "Sent"
+			}
+			bot.Send(fmt.Sprintf("[reply] %s to %s", action, replyTo))
+		}
+
+	case "adjust":
+		// Use adjusted text as the reply
+		replyBody = decision.Text
+		bot.Send(fmt.Sprintf("[reply] Updated. Send /reply %d %s to send with this text, or use the buttons.", idx, replyBody))
+
+	case "skip":
+		bot.Send("[reply] Cancelled.")
+	}
+}
+
+func handleReauth(bot *TGBot) {
+	if gmail == nil {
+		bot.Send("[reauth] Gmail connector not configured.")
+		return
+	}
+	scopes := []string{
+		"https://www.googleapis.com/auth/gmail.readonly",
+		"https://www.googleapis.com/auth/gmail.send",
+		"https://www.googleapis.com/auth/gmail.compose",
+	}
+	authURL := GenerateAuthURL(gmail.token.ClientID, scopes)
+	bot.Send(fmt.Sprintf("[reauth] Open this URL to grant send/compose permissions:\n\n%s\n\nAfter authorizing, send me the code with: /authcode <code>", authURL))
 }
 
 func handleCron(args string, bot *TGBot, sched *Scheduler) {
@@ -1447,8 +1595,12 @@ func main() {
 
 						// Intent detection — handle common requests directly
 						lower := strings.ToLower(text)
-						if gmail != nil && (strings.Contains(lower, "email") || strings.Contains(lower, "inbox") || strings.Contains(lower, "mail") || strings.Contains(lower, "unread")) {
-							handleEmails("", bot, &cfg, budget)
+						if gmail != nil && (strings.Contains(lower, "email") || strings.Contains(lower, "inbox") || strings.Contains(lower, "mail") || strings.Contains(lower, "unread") || strings.Contains(lower, "sent")) {
+							query := ""
+							if strings.Contains(lower, "sent") {
+								query = "in:sent"
+							}
+							handleEmails(query, bot, &cfg, budget)
 							continue
 						}
 

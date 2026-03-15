@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -274,4 +275,140 @@ func ExtractEmailAddress(from string) string {
 		return matches[1]
 	}
 	return from
+}
+
+// --- Write operations (require gmail.send or gmail.compose scope) ---
+
+func (g *GmailConnector) apiPost(endpoint string, body []byte) (json.RawMessage, error) {
+	if err := g.ensureToken(); err != nil {
+		return nil, err
+	}
+	req, _ := http.NewRequest("POST", "https://gmail.googleapis.com/gmail/v1/users/me/"+endpoint, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+g.accessToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("gmail API %d: %s", resp.StatusCode, string(respBody)[:min(300, len(respBody))])
+	}
+	return respBody, nil
+}
+
+// BuildReplyRaw creates a raw RFC 2822 message for replying
+func BuildReplyRaw(to, subject, inReplyTo, references, body string) string {
+	if !strings.HasPrefix(strings.ToLower(subject), "re:") {
+		subject = "Re: " + subject
+	}
+	msg := fmt.Sprintf("To: %s\r\nSubject: %s\r\nIn-Reply-To: %s\r\nReferences: %s\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s",
+		to, subject, inReplyTo, references, body)
+	return base64.URLEncoding.EncodeToString([]byte(msg))
+}
+
+// CreateDraft creates a draft reply (requires gmail.compose scope)
+func (g *GmailConnector) CreateDraft(to, subject, inReplyTo, references, threadID, body string) error {
+	raw := BuildReplyRaw(to, subject, inReplyTo, references, body)
+	payload := map[string]interface{}{
+		"message": map[string]interface{}{
+			"raw":      raw,
+			"threadId": threadID,
+		},
+	}
+	data, _ := json.Marshal(payload)
+	_, err := g.apiPost("drafts", data)
+	return err
+}
+
+// SendReply sends a reply directly (requires gmail.send scope)
+func (g *GmailConnector) SendReply(to, subject, inReplyTo, references, threadID, body string) error {
+	raw := BuildReplyRaw(to, subject, inReplyTo, references, body)
+	payload := map[string]interface{}{
+		"raw":      raw,
+		"threadId": threadID,
+	}
+	data, _ := json.Marshal(payload)
+	_, err := g.apiPost("messages/send", data)
+	return err
+}
+
+// GetFullMessage fetches a message with thread ID and message-id header for replying
+func (g *GmailConnector) GetFullMessage(id string) (*Email, string, string, string, error) {
+	raw, err := g.apiGet("messages/" + id + "?format=full")
+	if err != nil {
+		return nil, "", "", "", err
+	}
+
+	var msg struct {
+		ID       string `json:"id"`
+		ThreadId string `json:"threadId"`
+		Snippet  string `json:"snippet"`
+		Payload  struct {
+			Headers []struct {
+				Name  string `json:"name"`
+				Value string `json:"value"`
+			} `json:"headers"`
+			Parts []struct {
+				MimeType string `json:"mimeType"`
+				Body     struct {
+					Data string `json:"data"`
+				} `json:"body"`
+			} `json:"parts"`
+			Body struct {
+				Data string `json:"data"`
+			} `json:"body"`
+		} `json:"payload"`
+	}
+	json.Unmarshal(raw, &msg)
+
+	email := Email{ID: msg.ID, Snippet: msg.Snippet}
+	var messageID, references string
+	for _, h := range msg.Payload.Headers {
+		switch h.Name {
+		case "From":
+			email.From = h.Value
+		case "To":
+			email.To = h.Value
+		case "Subject":
+			email.Subject = h.Value
+		case "Date":
+			email.Date = h.Value
+		case "Message-ID", "Message-Id":
+			messageID = h.Value
+		case "References":
+			references = h.Value
+		}
+	}
+
+	// Extract body
+	if len(msg.Payload.Parts) > 0 {
+		for _, part := range msg.Payload.Parts {
+			if part.MimeType == "text/plain" && part.Body.Data != "" {
+				decoded, _ := base64.URLEncoding.DecodeString(part.Body.Data)
+				email.Body = string(decoded)
+				break
+			}
+		}
+	} else if msg.Payload.Body.Data != "" {
+		decoded, _ := base64.URLEncoding.DecodeString(msg.Payload.Body.Data)
+		email.Body = string(decoded)
+	}
+
+	return &email, msg.ThreadId, messageID, references, nil
+}
+
+// GenerateAuthURL generates an OAuth consent URL for re-authorization with new scopes
+func GenerateAuthURL(clientID string, scopes []string) string {
+	params := url.Values{
+		"client_id":     {clientID},
+		"redirect_uri":  {"urn:ietf:wg:oauth:2.0:oob"},
+		"response_type": {"code"},
+		"scope":         {strings.Join(scopes, " ")},
+		"access_type":   {"offline"},
+		"prompt":        {"consent"},
+	}
+	return "https://accounts.google.com/o/oauth2/v2/auth?" + params.Encode()
 }
