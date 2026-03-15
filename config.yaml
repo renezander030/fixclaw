@@ -43,6 +43,7 @@ timeouts:
   pipeline_total: 5m
 
 pipelines:
+  # Uses skill reference instead of inline prompt
   - name: test-screener
     schedule: manual
     steps:
@@ -51,18 +52,9 @@ pipelines:
 
       - name: classify
         type: ai
-        role: classifier
-        prompt: |
-          Score this job 1-5 for a freelancer with skills: AI/LLM, TypeScript, Go, cloud infra. Rate minimum: $60/hr.
-
-          Job: {{input}}
-
-          Respond with ONLY valid JSON:
-          {"score": <1-5>, "reason": "<one line>", "reject": <true/false>}
-        output_schema:
-          score: {type: int, min: 1, max: 5}
-          reason: {type: string}
-          reject: {type: bool}
+        skill: classify-job
+        vars:
+          profile: "AI/LLM, TypeScript, Go, cloud infra. $60/hr min."
 
       - name: review
         type: approval
@@ -70,4 +62,11 @@ pipelines:
         channel: telegram
 
       - name: log-result
+        type: deterministic
+
+  # Scheduled pipeline example
+  - name: heartbeat
+    schedule: 5m
+    steps:
+      - name: ping
         type: deterministic

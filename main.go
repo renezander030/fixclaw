@@ -9,7 +9,11 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -78,10 +82,173 @@ type StepConfig struct {
 	Name         string                 `yaml:"name"`
 	Type         string                 `yaml:"type"` // deterministic, ai, approval
 	Role         string                 `yaml:"role"`
+	Skill        string                 `yaml:"skill"` // reference to skills/<name>.yaml
 	Prompt       string                 `yaml:"prompt"`
+	Vars         map[string]string      `yaml:"vars"`  // variables injected into skill prompt
 	Mode         string                 `yaml:"mode"`
 	Channel      string                 `yaml:"channel"`
 	OutputSchema map[string]interface{} `yaml:"output_schema"`
+}
+
+// --- Skills ---
+
+type SkillDef struct {
+	Name         string                 `yaml:"name"`
+	Description  string                 `yaml:"description"`
+	Role         string                 `yaml:"role"`
+	Prompt       string                 `yaml:"prompt"`
+	OutputSchema map[string]interface{} `yaml:"output_schema"`
+}
+
+// SkillRegistry loads and holds all skills from the skills/ directory
+type SkillRegistry struct {
+	skills map[string]*SkillDef
+}
+
+func loadSkills(dir string) (*SkillRegistry, error) {
+	reg := &SkillRegistry{skills: make(map[string]*SkillDef)}
+	files, err := filepath.Glob(filepath.Join(dir, "*.yaml"))
+	if err != nil {
+		return reg, nil // no skills dir is fine
+	}
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			log.Printf("[skills] failed to read %s: %v", f, err)
+			continue
+		}
+		var skill SkillDef
+		if err := yaml.Unmarshal(data, &skill); err != nil {
+			log.Printf("[skills] failed to parse %s: %v", f, err)
+			continue
+		}
+		reg.skills[skill.Name] = &skill
+		log.Printf("[skills] loaded: %s (%s)", skill.Name, skill.Description)
+	}
+	return reg, nil
+}
+
+func (r *SkillRegistry) Get(name string) (*SkillDef, bool) {
+	s, ok := r.skills[name]
+	return s, ok
+}
+
+func (r *SkillRegistry) List() []*SkillDef {
+	var out []*SkillDef
+	for _, s := range r.skills {
+		out = append(out, s)
+	}
+	return out
+}
+
+// --- Scheduler ---
+
+type PipelineState struct {
+	Name     string
+	Schedule string
+	Paused   bool
+	LastRun  time.Time
+	NextRun  time.Time
+}
+
+type Scheduler struct {
+	mu        sync.Mutex
+	pipelines map[string]*PipelineState
+}
+
+func newScheduler(pipelines []PipelineConfig) *Scheduler {
+	s := &Scheduler{pipelines: make(map[string]*PipelineState)}
+	for _, p := range pipelines {
+		ps := &PipelineState{
+			Name:     p.Name,
+			Schedule: p.Schedule,
+		}
+		if p.Schedule != "manual" && p.Schedule != "" {
+			ps.NextRun = calcNextRun(p.Schedule)
+		}
+		s.pipelines[p.Name] = ps
+	}
+	return s
+}
+
+// calcNextRun parses simple interval schedules like "5m", "1h", "30s"
+func calcNextRun(schedule string) time.Time {
+	d, err := time.ParseDuration(schedule)
+	if err != nil {
+		return time.Time{} // invalid schedule, won't auto-run
+	}
+	return time.Now().Add(d)
+}
+
+func (s *Scheduler) GetAll() []*PipelineState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []*PipelineState
+	for _, ps := range s.pipelines {
+		out = append(out, ps)
+	}
+	return out
+}
+
+func (s *Scheduler) Pause(name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ps, ok := s.pipelines[name]; ok {
+		ps.Paused = true
+		return true
+	}
+	return false
+}
+
+func (s *Scheduler) Resume(name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ps, ok := s.pipelines[name]; ok {
+		ps.Paused = false
+		if ps.Schedule != "manual" && ps.Schedule != "" {
+			ps.NextRun = calcNextRun(ps.Schedule)
+		}
+		return true
+	}
+	return false
+}
+
+func (s *Scheduler) Reschedule(name string, schedule string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ps, ok := s.pipelines[name]; ok {
+		ps.Schedule = schedule
+		ps.NextRun = calcNextRun(schedule)
+		return true
+	}
+	return false
+}
+
+func (s *Scheduler) MarkRun(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ps, ok := s.pipelines[name]; ok {
+		ps.LastRun = time.Now()
+		if ps.Schedule != "manual" && ps.Schedule != "" {
+			ps.NextRun = calcNextRun(ps.Schedule)
+		}
+	}
+}
+
+func (s *Scheduler) GetDue() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var due []string
+	now := time.Now()
+	for name, ps := range s.pipelines {
+		if ps.Paused || ps.Schedule == "manual" || ps.Schedule == "" {
+			continue
+		}
+		if !ps.NextRun.IsZero() && now.After(ps.NextRun) {
+			due = append(due, name)
+		}
+	}
+	return due
 }
 
 // --- Guardrails ---
@@ -685,7 +852,7 @@ func (t *TGBot) getUpdates() ([]TGUpdate, error) {
 
 // --- Pipeline Engine ---
 
-func runPipeline(cfg *Config, pipeline PipelineConfig, budget *BudgetTracker, ch OperatorChannel) error {
+func runPipeline(cfg *Config, pipeline PipelineConfig, budget *BudgetTracker, ch OperatorChannel, skills *SkillRegistry) error {
 	log.Printf("[pipeline:%s] starting", pipeline.Name)
 	budget.tokensUsedPipeline = 0
 
@@ -729,8 +896,30 @@ Description: We need an experienced LLM engineer to build a retrieval-augmented 
 				return err
 			}
 
-			// Build prompt with template substitution
+			// Resolve skill or use inline prompt
 			prompt := step.Prompt
+			role := step.Role
+			schema := step.OutputSchema
+
+			if step.Skill != "" {
+				skill, ok := skills.Get(step.Skill)
+				if !ok {
+					return fmt.Errorf("[step:%s] unknown skill: %s", step.Name, step.Skill)
+				}
+				prompt = skill.Prompt
+				role = skill.Role
+				if len(skill.OutputSchema) > 0 {
+					schema = skill.OutputSchema
+				}
+				log.Printf("[pipeline:%s][step:%s] using skill: %s", pipeline.Name, step.Name, step.Skill)
+			}
+
+			// Inject step vars
+			for k, v := range step.Vars {
+				prompt = strings.ReplaceAll(prompt, "{{"+k+"}}", v)
+			}
+
+			// Inject pipeline data
 			for k, v := range data {
 				prompt = strings.ReplaceAll(prompt, "{{"+k+"}}", fmt.Sprintf("%v", v))
 			}
@@ -742,7 +931,7 @@ Description: We need an experienced LLM engineer to build a retrieval-augmented 
 			}
 			aiCtx, aiCancel := context.WithTimeout(ctx, aiTimeout)
 
-			resp, err := callLLM(aiCtx, cfg, step.Role, prompt)
+			resp, err := callLLM(aiCtx, cfg, role, prompt)
 			aiCancel()
 			if err != nil {
 				return fmt.Errorf("[step:%s] LLM call failed: %w", step.Name, err)
@@ -755,8 +944,8 @@ Description: We need an experienced LLM engineer to build a retrieval-augmented 
 				resp.InputTokens, resp.OutputTokens, resp.CostUSD, resp.LatencyMs)
 
 			// Validate output
-			if len(step.OutputSchema) > 0 {
-				parsed, err := validateOutput(resp.Text, step.OutputSchema)
+			if len(schema) > 0 {
+				parsed, err := validateOutput(resp.Text, schema)
 				if err != nil {
 					log.Printf("[pipeline:%s][step:%s] OUTPUT_INVALID: %s", pipeline.Name, step.Name, err)
 					return fmt.Errorf("[step:%s] output validation failed: %w", step.Name, err)
@@ -852,6 +1041,165 @@ Description: We need an experienced LLM engineer to build a retrieval-augmented 
 	return nil
 }
 
+// --- Command Handler ---
+// Handles operator commands like /cron, /skills, /run, /status
+
+func handleCommand(cmd string, args string, bot *TGBot, sched *Scheduler, skills *SkillRegistry, cfg *Config, budget *BudgetTracker) {
+	switch cmd {
+	case "/cron":
+		handleCron(args, bot, sched)
+	case "/skills":
+		handleSkills(bot, skills)
+	case "/run":
+		handleRun(args, bot, sched, cfg, budget, skills)
+	case "/status":
+		handleStatus(bot, budget, sched)
+	case "/help":
+		bot.Send("Commands:\n/cron - View and manage pipeline schedules\n/skills - List available skills\n/run <pipeline> - Run a pipeline now\n/status - Engine status and token usage")
+	}
+}
+
+func handleCron(args string, bot *TGBot, sched *Scheduler) {
+	parts := strings.Fields(args)
+
+	// /cron with no args — show all pipelines
+	if len(parts) == 0 {
+		states := sched.GetAll()
+		if len(states) == 0 {
+			bot.Send("[cron] No pipelines configured.")
+			return
+		}
+		msg := "[cron] Pipeline schedules:\n"
+		for _, ps := range states {
+			status := "active"
+			if ps.Paused {
+				status = "PAUSED"
+			}
+			if ps.Schedule == "manual" || ps.Schedule == "" {
+				status = "manual"
+			}
+			nextStr := "-"
+			if !ps.NextRun.IsZero() && !ps.Paused {
+				nextStr = ps.NextRun.Format("15:04:05")
+			}
+			lastStr := "-"
+			if !ps.LastRun.IsZero() {
+				lastStr = ps.LastRun.Format("15:04:05")
+			}
+			msg += fmt.Sprintf("\n%s [%s]\n  schedule: %s | last: %s | next: %s",
+				ps.Name, status, ps.Schedule, lastStr, nextStr)
+		}
+
+		// Show inline buttons for each pipeline
+		var buttons [][]map[string]string
+		for _, ps := range states {
+			if ps.Paused {
+				buttons = append(buttons, []map[string]string{
+					{"text": "Resume " + ps.Name, "callback_data": "cron:resume:" + ps.Name},
+				})
+			} else if ps.Schedule != "manual" && ps.Schedule != "" {
+				buttons = append(buttons, []map[string]string{
+					{"text": "Pause " + ps.Name, "callback_data": "cron:pause:" + ps.Name},
+				})
+			}
+			buttons = append(buttons, []map[string]string{
+				{"text": "Run " + ps.Name + " now", "callback_data": "cron:run:" + ps.Name},
+			})
+		}
+		bot.sendWithButtons(msg, buttons)
+		return
+	}
+
+	// /cron pause <name>
+	if parts[0] == "pause" && len(parts) > 1 {
+		if sched.Pause(parts[1]) {
+			bot.Send(fmt.Sprintf("[cron] Paused: %s", parts[1]))
+		} else {
+			bot.Send(fmt.Sprintf("[cron] Unknown pipeline: %s", parts[1]))
+		}
+		return
+	}
+
+	// /cron resume <name>
+	if parts[0] == "resume" && len(parts) > 1 {
+		if sched.Resume(parts[1]) {
+			bot.Send(fmt.Sprintf("[cron] Resumed: %s", parts[1]))
+		} else {
+			bot.Send(fmt.Sprintf("[cron] Unknown pipeline: %s", parts[1]))
+		}
+		return
+	}
+
+	// /cron set <name> <schedule>
+	if parts[0] == "set" && len(parts) > 2 {
+		if sched.Reschedule(parts[1], parts[2]) {
+			bot.Send(fmt.Sprintf("[cron] Rescheduled %s to %s", parts[1], parts[2]))
+		} else {
+			bot.Send(fmt.Sprintf("[cron] Unknown pipeline: %s", parts[1]))
+		}
+		return
+	}
+
+	bot.Send("[cron] Usage: /cron | /cron pause <name> | /cron resume <name> | /cron set <name> <interval>")
+}
+
+func handleSkills(bot *TGBot, skills *SkillRegistry) {
+	list := skills.List()
+	if len(list) == 0 {
+		bot.Send("[skills] No skills loaded.")
+		return
+	}
+	msg := "[skills] Available skills:\n"
+	for _, s := range list {
+		msg += fmt.Sprintf("\n  %s — %s (role: %s)", s.Name, s.Description, s.Role)
+	}
+	bot.Send(msg)
+}
+
+func handleRun(args string, bot *TGBot, sched *Scheduler, cfg *Config, budget *BudgetTracker, skills *SkillRegistry) {
+	name := strings.TrimSpace(args)
+	if name == "" {
+		bot.Send("[run] Usage: /run <pipeline-name>")
+		return
+	}
+	// Find pipeline config
+	var pipeline *PipelineConfig
+	for i := range cfg.Pipelines {
+		if cfg.Pipelines[i].Name == name {
+			pipeline = &cfg.Pipelines[i]
+			break
+		}
+	}
+	if pipeline == nil {
+		bot.Send(fmt.Sprintf("[run] Unknown pipeline: %s", name))
+		return
+	}
+	bot.Send(fmt.Sprintf("[run] Starting: %s", name))
+	go func() {
+		if err := runPipeline(cfg, *pipeline, budget, bot, skills); err != nil {
+			log.Printf("[run] pipeline %s error: %v", name, err)
+			bot.Send(fmt.Sprintf("[run] ERROR in %s: %s", name, err))
+		}
+		sched.MarkRun(name)
+	}()
+}
+
+func handleStatus(bot *TGBot, budget *BudgetTracker, sched *Scheduler) {
+	states := sched.GetAll()
+	active := 0
+	paused := 0
+	for _, ps := range states {
+		if ps.Paused {
+			paused++
+		} else {
+			active++
+		}
+	}
+	msg := fmt.Sprintf("[status] Engine running\nPipelines: %d active, %d paused\nTokens today: %d\nBudget day start: %s",
+		active, paused, budget.tokensUsedToday, budget.dayStart.Format("15:04:05"))
+	bot.Send(msg)
+}
+
 // --- Main ---
 
 func main() {
@@ -886,8 +1234,18 @@ func main() {
 		log.Fatalf("%v", err)
 	}
 
-	log.Printf("aiops starting — %d pipeline(s), provider=%s, operator=telegram:%d, allowed_users=%v",
-		len(cfg.Pipelines), cfg.Provider.Type, cfg.Telegram.ChatID, cfg.Telegram.Security.AllowedUsers)
+	// Load skills
+	skillsDir := "skills"
+	if len(os.Args) > 2 {
+		skillsDir = os.Args[2]
+	}
+	skillReg, _ := loadSkills(skillsDir)
+
+	// Init scheduler
+	sched := newScheduler(cfg.Pipelines)
+
+	log.Printf("aiops starting — %d pipeline(s), %d skill(s), provider=%s, operator=telegram:%d",
+		len(cfg.Pipelines), len(skillReg.skills), cfg.Provider.Type, cfg.Telegram.ChatID)
 
 	bot := &TGBot{
 		token:       cfg.Telegram.token,
@@ -897,23 +1255,133 @@ func main() {
 	}
 	budget := &BudgetTracker{dayStart: time.Now()}
 
-	// Drain pending updates so we don't process old messages
+	// Drain pending updates
 	bot.getUpdates()
 
-	// For now: run first pipeline once (manual trigger)
-	if len(cfg.Pipelines) == 0 {
-		log.Fatal("no pipelines configured")
+	// Startup notification
+	bot.Send("[aiops] Engine started. Send /help for commands.")
+
+	// Signal handling for graceful shutdown
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	// Main event loop — polls for commands and runs scheduled pipelines
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	log.Printf("aiops running. Waiting for commands and scheduled pipelines...")
+
+	for {
+		select {
+		case sig := <-sigCh:
+			log.Printf("received %s, shutting down", sig)
+			bot.Send("[aiops] Engine stopping.")
+			return
+
+		case <-ticker.C:
+			// 1. Check for operator commands
+			updates, err := bot.getUpdates()
+			if err != nil {
+				continue
+			}
+			for _, u := range updates {
+				if u.Message == nil {
+					continue
+				}
+				if u.Message.Chat.ID != bot.chatID {
+					continue
+				}
+				if !bot.isAllowedUser(u.Message.From.ID) {
+					continue
+				}
+
+				text := strings.TrimSpace(u.Message.Text)
+				if strings.HasPrefix(text, "/") {
+					parts := strings.SplitN(text, " ", 2)
+					cmd := parts[0]
+					args := ""
+					if len(parts) > 1 {
+						args = parts[1]
+					}
+					handleCommand(cmd, args, bot, sched, skillReg, &cfg, budget)
+				}
+
+				// Handle callback queries for /cron buttons
+				if u.CallbackQuery != nil {
+					cb := u.CallbackQuery
+					if !bot.isAllowedUser(cb.From.ID) {
+						bot.answerCallback(cb.ID, "Access denied.")
+						continue
+					}
+					if strings.HasPrefix(cb.Data, "cron:") {
+						parts := strings.SplitN(cb.Data, ":", 3)
+						if len(parts) == 3 {
+							switch parts[1] {
+							case "pause":
+								sched.Pause(parts[2])
+								bot.answerCallback(cb.ID, "Paused: "+parts[2])
+								bot.Send(fmt.Sprintf("[cron] Paused: %s", parts[2]))
+							case "resume":
+								sched.Resume(parts[2])
+								bot.answerCallback(cb.ID, "Resumed: "+parts[2])
+								bot.Send(fmt.Sprintf("[cron] Resumed: %s", parts[2]))
+							case "run":
+								bot.answerCallback(cb.ID, "Starting: "+parts[2])
+								handleRun(parts[2], bot, sched, &cfg, budget, skillReg)
+							}
+						}
+					}
+				}
+			}
+
+			// Also check for callback queries in updates
+			for _, u := range updates {
+				if u.CallbackQuery != nil && u.Message == nil {
+					cb := u.CallbackQuery
+					if !bot.isAllowedUser(cb.From.ID) {
+						bot.answerCallback(cb.ID, "Access denied.")
+						continue
+					}
+					if strings.HasPrefix(cb.Data, "cron:") {
+						parts := strings.SplitN(cb.Data, ":", 3)
+						if len(parts) == 3 {
+							switch parts[1] {
+							case "pause":
+								sched.Pause(parts[2])
+								bot.answerCallback(cb.ID, "Paused: "+parts[2])
+								bot.Send(fmt.Sprintf("[cron] Paused: %s", parts[2]))
+							case "resume":
+								sched.Resume(parts[2])
+								bot.answerCallback(cb.ID, "Resumed: "+parts[2])
+								bot.Send(fmt.Sprintf("[cron] Resumed: %s", parts[2]))
+							case "run":
+								bot.answerCallback(cb.ID, "Starting: "+parts[2])
+								handleRun(parts[2], bot, sched, &cfg, budget, skillReg)
+							}
+						}
+					}
+				}
+			}
+
+			// 2. Check for scheduled pipelines
+			due := sched.GetDue()
+			for _, name := range due {
+				for i := range cfg.Pipelines {
+					if cfg.Pipelines[i].Name == name {
+						log.Printf("[scheduler] running due pipeline: %s", name)
+						go func(p PipelineConfig) {
+							if err := runPipeline(&cfg, p, budget, bot, skillReg); err != nil {
+								log.Printf("[scheduler] pipeline %s error: %v", p.Name, err)
+								bot.Send(fmt.Sprintf("[aiops] ERROR in %s: %s", p.Name, err))
+							}
+							sched.MarkRun(p.Name)
+						}(cfg.Pipelines[i])
+						break
+					}
+				}
+			}
+		}
 	}
-
-	// Send startup notification
-	bot.Send("[aiops] Engine started. Running pipeline: " + cfg.Pipelines[0].Name)
-
-	if err := runPipeline(&cfg, cfg.Pipelines[0], budget, bot); err != nil {
-		log.Printf("pipeline error: %v", err)
-		bot.Send(fmt.Sprintf("[aiops] ERROR: %s", err))
-	}
-
-	log.Printf("aiops done. daily tokens used: %d", budget.tokensUsedToday)
 }
 
 func resolveEnv(names ...string) string {

@@ -1,0 +1,14 @@
+name: draft-followup
+description: Draft a follow-up email
+role: drafter
+prompt: |
+  Draft a follow-up email.
+  Tone: {{tone}}
+  Sender: {{sender}}
+  Subject: {{subject}}
+  Thread history: {{thread_history}}
+  {{#memory}}Operator preferences: {{memory}}{{/memory}}
+  Respond with ONLY valid JSON: {"subject": "<subject line>", "body": "<email body>"}
+output_schema:
+  subject: {type: string}
+  body: {type: string}

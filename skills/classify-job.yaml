@@ -1,0 +1,12 @@
+name: classify-job
+description: Score a job posting for freelancer fit
+role: classifier
+prompt: |
+  Score this job 1-5 for fit.
+  Profile: {{profile}}
+  Job: {{input}}
+  Respond with ONLY valid JSON: {"score": <1-5>, "reason": "<one line>", "reject": <true/false>}
+output_schema:
+  score: {type: int, min: 1, max: 5}
+  reason: {type: string}
+  reject: {type: bool}
