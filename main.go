@@ -1183,6 +1183,41 @@ func handleEmails(args string, bot *TGBot, cfg *Config, budget *BudgetTracker) {
 		return
 	}
 
+	// If specific query returned nothing, try broader search and filter client-side
+	if len(emails) == 0 && query != "" && query != "is:unread" {
+		log.Printf("[emails] no results for %q, trying broader search", query)
+		// Extract the name/keyword from query for client-side filtering
+		filterTerm := ""
+		for _, part := range strings.Fields(query) {
+			if strings.HasPrefix(part, "to:") {
+				filterTerm = strings.TrimPrefix(part, "to:")
+			} else if strings.HasPrefix(part, "from:") {
+				filterTerm = strings.TrimPrefix(part, "from:")
+			}
+		}
+		// Broaden: just use in:sent or no filter
+		broadQuery := ""
+		if strings.Contains(query, "in:sent") {
+			broadQuery = "in:sent"
+		}
+		broader, err := gmail.FetchRecent(broadQuery, 20)
+		if err == nil && filterTerm != "" {
+			// Client-side filter by name in From/To/Subject
+			ft := strings.ToLower(filterTerm)
+			var filtered []Email
+			for _, e := range broader {
+				if strings.Contains(strings.ToLower(e.From), ft) ||
+					strings.Contains(strings.ToLower(e.To), ft) ||
+					strings.Contains(strings.ToLower(e.Subject), ft) {
+					filtered = append(filtered, e)
+				}
+			}
+			emails = filtered
+		} else if err == nil {
+			emails = broader
+		}
+	}
+
 	// Store for /reply reference
 	lastEmailsMu.Lock()
 	lastEmails = emails
