@@ -1671,8 +1671,11 @@ Rules:
 - "send a reply" with no target = reply to email 1
 - "check sent" / "show sent emails" / "what did I send" = {"intent":"emails","query":"in:sent"}
 - "emails from john" = {"intent":"emails","query":"from:john"}
+- "what did I reply to john" / "my reply to john" = {"intent":"emails","query":"to:john in:sent"}
+- "emails to sarah" = {"intent":"emails","query":"to:sarah in:sent"}
 - "can you see sent emails" = {"intent":"emails","query":"in:sent"}
-- Questions about what you can do = {"intent":"chat"}`, emailCtx, text)
+- Questions about what you can do = {"intent":"chat"}
+- IMPORTANT: "from:" means received FROM someone. "to:" means sent TO someone. If the user asks what THEY sent/replied to someone, use "to:<name> in:sent"`, emailCtx, text)
 
 							intentResp, err := callLLM(intentCtx, &cfg, "classifier", intentPrompt)
 							intentCancel()
