@@ -1660,15 +1660,19 @@ Available emails:
 %s
 Message: %s
 
-If the user wants to read/check/fetch emails: {"intent":"emails","query":"<gmail query or empty>"}
-If the user wants to reply/respond/send to an email: {"intent":"reply","number":<1-based index>,"body":"<reply text or empty for AI draft>"}
-If neither: {"intent":"chat"}
+Intents:
+- Read/check/fetch/search emails (inbox, sent, from someone): {"intent":"emails","query":"<gmail query or empty>"}
+- Reply/respond/send to an email: {"intent":"reply","number":<1-based index>,"body":"<reply text or empty for AI draft>"}
+- Anything else (questions, conversation, commands): {"intent":"chat"}
 
 Rules:
 - If they mention a name or sender, match it to the email list and return the number
 - "reply to rene" = find email from rene in list, return its number
 - "send a reply" with no target = reply to email 1
-- "check sent" = {"intent":"emails","query":"in:sent"}`, emailCtx, text)
+- "check sent" / "show sent emails" / "what did I send" = {"intent":"emails","query":"in:sent"}
+- "emails from john" = {"intent":"emails","query":"from:john"}
+- "can you see sent emails" = {"intent":"emails","query":"in:sent"}
+- Questions about what you can do = {"intent":"chat"}`, emailCtx, text)
 
 							intentResp, err := callLLM(intentCtx, &cfg, "classifier", intentPrompt)
 							intentCancel()
@@ -1728,7 +1732,7 @@ Rules:
 							}
 							gmailStatus := "not configured"
 							if gmail != nil {
-								gmailStatus = "connected (read-only)"
+								gmailStatus = fmt.Sprintf("connected (permission: %s) — can read inbox, sent, search, and reply to emails", cfg.Gmail.Permission)
 							}
 							history := chatHistory.FormatForPrompt()
 							sysPrompt := fmt.Sprintf(`You are aiops, an AI operations assistant running as a Telegram bot.
