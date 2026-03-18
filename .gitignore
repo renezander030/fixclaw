@@ -2,3 +2,6 @@ aiops
 *.env
 *.key
 *.secret
+secrets.yaml
+architecture.png
+aiops-architecture-diagram.py

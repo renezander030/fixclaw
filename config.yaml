@@ -3,16 +3,15 @@
 
 telegram:
   token_env: AIOPS_TG_TOKEN
-  chat_id: 525240338
+  secrets_file: secrets.yaml      # chat_id + allowed_users (gitignored)
   # REQUIRED — engine refuses to start without this
   security:
-    allowed_users: [525240338]    # TG user IDs that may interact (Rene)
     max_input_length: 500         # max chars per operator message
     rate_limit: 10                # max messages per minute per user
     strip_markdown: true          # strip formatting that could break prompt boundaries
 
 gmail:
-  token_path: /home/debian/.config/google-gmail-token.json
+  token_path: ~/.config/google-gmail-token.json
   permission: send          # read + send (with HITL approval)
 
 provider:
