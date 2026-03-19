@@ -6,9 +6,7 @@ Fixclaw does. It's a lightweight AI automation engine for business operations. W
 
 ![Architecture](architecture.png)
 
-<!-- TODO: Record a 15-second GIF of the Slack approval flow:
-     email arrives > AI classifies > operator reviews in Slack > approved/rejected -->
-<!-- ![Demo](demo.gif) -->
+![Slack approval flow](demo.gif)
 
 ## Quickstart
 
