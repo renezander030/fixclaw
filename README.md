@@ -4,9 +4,9 @@ Your team processes hundreds of emails a day. AI assistants like Claude Dispatch
 
 Fixclaw does. It's a lightweight AI automation engine for business operations. Written in Go.
 
-![Architecture](architecture.png)
-
 ![Slack approval flow](demo.gif)
+
+![Architecture](architecture.png)
 
 ## Quickstart
 
