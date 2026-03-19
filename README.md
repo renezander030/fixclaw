@@ -1,46 +1,99 @@
 # Fixclaw
 
-Your AI email assistant, production-ready in days, not months. Written in Go.
+Your team processes hundreds of emails a day. AI assistants like Claude Dispatch and OpenClaw handle personal inboxes. But they don't do compliance, audit trails, or defined business workflows.
+
+Fixclaw does. It's a lightweight AI automation engine for business operations. Written in Go.
 
 ![Architecture](architecture.png)
 
-## What it does
+<!-- TODO: Record a 15-second GIF of the Slack approval flow:
+     email arrives > AI classifies > operator reviews in Slack > approved/rejected -->
+<!-- ![Demo](demo.gif) -->
 
-Fixclaw is a lightweight engine that runs AI-powered automation pipelines. Each pipeline is a sequence of steps: deterministic actions (fetch data, filter, route) and AI steps (classify, draft, summarize). AI never executes. It produces text. Deterministic code decides what happens next.
+## Quickstart
 
-Every AI action goes through a human-in-the-loop approval flow before anything leaves the system. The operator reviews, edits, approves, or rejects via Slack.
-
-## Design principles
-
-- **Deterministic first.** Fetching, filtering, and routing are plain code. AI is only used for judgment calls: classification, drafting, summarization.
-- **AI never executes.** The LLM produces text. Deterministic code validates the output against a schema and decides whether to act on it.
-- **YAML-configured.** No code per automation. Define pipelines, steps, models, budgets, and skills in YAML.
-- **Hardened by default.** Token budgets, rate limiting, input sanitization, output validation, and prompt injection defense are built in.
-
-## Project structure
-
+```bash
+git clone https://github.com/renezander030/fixclaw.git && cd fixclaw
+cp secrets.yaml.example secrets.yaml   # add your Slack + API keys
+go build -o fixclaw . && ./fixclaw
 ```
-fixclaw/
-  main.go          # Engine: pipeline runner, Slack bot, scheduler, guardrails
-  gmail.go         # Microsoft 365 / Gmail integration (OAuth 2.0, read + send with HITL approval)
-  config.yaml      # Pipelines, models, budgets, timeouts
-  secrets.yaml     # Private config (operator IDs) — gitignored
-  skills/
-    classify-job.yaml    # Job classification prompt template
-    draft-followup.yaml  # Follow-up email drafter
-    email-digest.yaml    # Unread email summarizer
+
+Define your pipelines in `config.yaml`, your prompts in `skills/`, and fixclaw handles the rest.
+
+## Built for
+
+Small businesses and ops teams that need AI automation with governance. Not for personal productivity. Use Dispatch for that.
+
+Use cases:
+- Route and classify incoming customer emails through defined pipelines
+- Draft follow-ups with human approval before anything gets sent
+- Summarize unread emails on a schedule with token budget enforcement
+
+## Why not Dispatch or OpenClaw?
+
+| | **Claude Dispatch** | **OpenClaw** | **fixclaw** |
+|---|---|---|---|
+| **Purpose** | Personal productivity | Personal AI agent | Business operations |
+| **Governance** | Anthropic-managed | None | You own it: YAML pipelines, token budgets, audit trail |
+| **Human-in-the-loop** | Pause on destructive actions | Optional | Every outbound action requires operator approval via Slack |
+| **Token budgets** | None (subscription) | None | Per-step, per-pipeline, per-day limits |
+| **Prompt injection defense** | Platform-level | None | Input sanitization + output schema validation built in |
+| **Hosting** | Anthropic cloud | Self-hosted | Self-hosted. Your data stays on your infra |
+| **Integrations** | Google Drive, Slack | Telegram, Signal, etc. | Microsoft 365, Gmail, Slack |
+| **Configuration** | Natural language | Natural language | YAML. Deterministic, version-controlled, auditable |
+
+Dispatch and OpenClaw are great for personal use. Fixclaw is what you deploy when the output touches customers, contracts, or compliance.
+
+## How it works
+
+Fixclaw runs pipelines. Each pipeline is a sequence of typed steps:
+
+| Step type | What it does |
+|---|---|
+| `deterministic` | Plain code: fetch emails, filter, route, notify |
+| `ai` | LLM inference with a skill template, budget-checked |
+| `approval` | Human-in-the-loop: operator reviews via Slack before proceeding |
+
+**AI never executes.** The LLM produces text. Deterministic code validates the output against a schema and decides what happens next.
+
+Example pipeline:
+
+```yaml
+pipelines:
+  - name: email-digest
+    schedule: 30m
+    steps:
+      - name: fetch-unread
+        type: deterministic
+        action: email_unread
+
+      - name: summarize
+        type: ai
+        skill: email-digest
+
+      - name: report
+        type: deterministic
+        action: notify
 ```
+
+## Guardrails
+
+- **Token budgets**: per-step, per-pipeline, and per-day limits. Exceeding any budget halts the pipeline.
+- **Rate limiting**: per-user, per-minute limits on operator interactions.
+- **Input sanitization**: strips markdown and detects prompt injection patterns before forwarding to the LLM.
+- **Output validation**: AI output is validated against the skill's output schema. Invalid output is rejected.
+- **Human-in-the-loop**: approval steps present AI output to the operator via Slack with approve/edit/reject buttons. Nothing leaves the system without explicit approval.
 
 ## Configuration
 
 ### config.yaml
 
-The main config defines your LLM providers, models, token budgets, and pipelines.
+Defines your LLM providers, models, token budgets, and pipelines.
 
 ```yaml
 provider:
   type: openrouter
-  api_key_env: OPENROUTER_API_KEY    # reads from environment variable
+  api_key_env: OPENROUTER_API_KEY
   base_url: https://openrouter.ai/api/v1
 
 models:
@@ -70,7 +123,7 @@ slack:
 
 ### Skills
 
-Skills are YAML prompt templates stored in `skills/`. Each skill defines the system prompt, input variables, and optional output schema for validation.
+YAML prompt templates in `skills/`. Each skill defines the system prompt, input variables, and optional output schema for validation.
 
 ```yaml
 # skills/classify-job.yaml
@@ -89,59 +142,19 @@ output_schema:
   required: [match, reason, score]
 ```
 
-## Pipelines
+## Project structure
 
-A pipeline is a sequence of typed steps:
-
-| Step type | What it does |
-|---|---|
-| `deterministic` | Plain code: fetch emails, filter data, send notifications |
-| `ai` | LLM inference with a skill template, budget-checked |
-| `approval` | Human-in-the-loop: operator reviews via Slack before proceeding |
-
-Example pipeline from `config.yaml`:
-
-```yaml
-pipelines:
-  - name: email-digest
-    schedule: 30m
-    steps:
-      - name: fetch-unread
-        type: deterministic
-        action: email_unread
-
-      - name: summarize
-        type: ai
-        skill: email-digest
-
-      - name: report
-        type: deterministic
-        action: notify
 ```
-
-## Guardrails
-
-- **Token budgets**: per-step, per-pipeline, and per-day limits. Exceeding any budget halts the pipeline.
-- **Rate limiting**: per-user, per-minute limits on operator interactions.
-- **Input sanitization**: strips markdown and detects prompt injection patterns before forwarding to the LLM.
-- **Output validation**: AI output is validated against the skill's output schema. Invalid output is rejected.
-- **Human-in-the-loop**: approval steps present the AI output to the operator via Slack with approve/edit/reject buttons. Nothing leaves the system without explicit approval.
-
-## Setup
-
-1. Clone the repo
-2. Copy `secrets.yaml.example` to `secrets.yaml` and fill in your operator IDs
-3. Set environment variables:
-   ```
-   export FIXCLAW_SLACK_TOKEN=your-slack-bot-token
-   export OPENROUTER_API_KEY=your-openrouter-key
-   ```
-4. For email integration: configure your Microsoft 365 or Gmail OAuth token
-5. Build and run:
-   ```
-   go build -o fixclaw .
-   ./fixclaw
-   ```
+fixclaw/
+  main.go          # Engine: pipeline runner, Slack bot, scheduler, guardrails
+  gmail.go         # Microsoft 365 / Gmail integration (OAuth 2.0, read + send with HITL approval)
+  config.yaml      # Pipelines, models, budgets, timeouts
+  secrets.yaml     # Private config (operator IDs) — gitignored
+  skills/
+    classify-job.yaml    # Job classification prompt template
+    draft-followup.yaml  # Follow-up email drafter
+    email-digest.yaml    # Unread email summarizer
+```
 
 ## License
 
