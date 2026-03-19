@@ -1,8 +1,8 @@
-# Fixclaw
+# FixClaw
 
 Your team processes hundreds of emails a day. AI assistants like Claude Dispatch and OpenClaw handle personal inboxes. But they don't do compliance, audit trails, or defined business workflows.
 
-Fixclaw does. It's a lightweight AI automation engine for business operations. Written in Go.
+FixClaw does. It's a lightweight AI automation engine for business operations. Written in Go.
 
 ![Slack approval flow](demo.gif)
 
@@ -16,7 +16,7 @@ cp secrets.yaml.example secrets.yaml   # add your Slack + API keys
 go build -o fixclaw . && ./fixclaw
 ```
 
-Define your pipelines in `config.yaml`, your prompts in `skills/`, and fixclaw handles the rest.
+Define your pipelines in `config.yaml`, your prompts in `skills/`, and FixClaw handles the rest.
 
 ## Built for
 
@@ -29,7 +29,7 @@ Use cases:
 
 ## Why not Dispatch or OpenClaw?
 
-| | **Claude Dispatch** | **OpenClaw** | **fixclaw** |
+| | **Claude Dispatch** | **OpenClaw** | **FixClaw** |
 |---|---|---|---|
 | **Purpose** | Personal productivity | Personal AI agent | Business operations |
 | **Governance** | Anthropic-managed | None | You own it: YAML pipelines, token budgets, audit trail |
@@ -40,11 +40,11 @@ Use cases:
 | **Integrations** | Google Drive, Slack | Telegram, Signal, etc. | Microsoft 365, Gmail, Slack |
 | **Configuration** | Natural language | Natural language | YAML. Deterministic, version-controlled, auditable |
 
-Dispatch and OpenClaw are great for personal use. Fixclaw is what you deploy when the output touches customers, contracts, or compliance.
+Dispatch and OpenClaw are great for personal use. FixClaw is what you deploy when the output touches customers, contracts, or compliance.
 
 ## How it works
 
-Fixclaw runs pipelines. Each pipeline is a sequence of typed steps:
+FixClaw runs pipelines. Each pipeline is a sequence of typed steps:
 
 | Step type | What it does |
 |---|---|
