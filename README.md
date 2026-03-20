@@ -1,12 +1,12 @@
 # FixClaw
 
-Your team processes hundreds of emails a day. AI assistants like Claude Dispatch and OpenClaw handle personal inboxes. But they don't do compliance, audit trails, or defined business workflows.
+AI automation for business operations -- with governance built in.
 
-FixClaw does. It's a lightweight AI automation engine for business operations. Written in Go.
+FixClaw is a pipeline engine written in Go that puts AI to work on real operations workflows (email triage, customer follow-ups, job classification) while enforcing token budgets, audit trails, input sanitization, and human-in-the-loop approval on every outbound action.
+
+**AI never executes. Deterministic code does.**
 
 ![Slack approval flow](demo.gif)
-
-![Architecture](architecture.png)
 
 ## Quickstart
 
@@ -18,31 +18,32 @@ go build -o fixclaw . && ./fixclaw
 
 Define your pipelines in `config.yaml`, your prompts in `skills/`, and FixClaw handles the rest.
 
-## Built for
+## Why FixClaw
 
-Small businesses and ops teams that need AI automation with governance. Not for personal productivity. Use Dispatch for that.
-
-Use cases:
-- Route and classify incoming customer emails through defined pipelines
-- Draft follow-ups with human approval before anything gets sent
-- Summarize unread emails on a schedule with token budget enforcement
-
-## Why not Dispatch or OpenClaw?
+Operations teams use AI assistants for personal productivity. But when AI output touches customers, contracts, or compliance, you need more than a chatbot.
 
 | | **Claude Dispatch** | **OpenClaw** | **FixClaw** |
 |---|---|---|---|
 | **Purpose** | Personal productivity | Personal AI agent | Business operations |
 | **Governance** | Anthropic-managed | None | You own it: YAML pipelines, token budgets, audit trail |
-| **Human-in-the-loop** | Pause on destructive actions | Optional | Every outbound action requires operator approval via Slack |
+| **Human-in-the-loop** | Pause on destructive actions | Optional | Every outbound action requires operator approval |
 | **Token budgets** | None (subscription) | None | Per-step, per-pipeline, per-day limits |
-| **Prompt injection defense** | Platform-level | None | Input sanitization + output schema validation built in |
-| **Hosting** | Anthropic cloud | Self-hosted | Self-hosted. Your data stays on your infra |
-| **Integrations** | Google Drive, Slack | Telegram, Signal, etc. | Microsoft 365, Gmail, Slack |
+| **Prompt injection defense** | Platform-level | None | Input sanitization + output schema validation |
+| **Data residency** | Anthropic cloud | Self-hosted | Self-hosted. Your data stays on your infrastructure |
 | **Configuration** | Natural language | Natural language | YAML. Deterministic, version-controlled, auditable |
 
-Dispatch and OpenClaw are great for personal use. FixClaw is what you deploy when the output touches customers, contracts, or compliance.
+## Governance and Compliance
 
-## How it works
+Every pipeline run produces a verifiable audit trail:
+
+- **Token budgets** -- per-step, per-pipeline, and per-day limits. Exceeding any budget halts the pipeline immediately. No silent overruns.
+- **Human-in-the-loop** -- approval steps present AI output to the operator via Slack/Telegram with approve/edit/reject controls. Nothing leaves the system without explicit sign-off.
+- **Input sanitization** -- operator input is scanned for prompt injection patterns, stripped of role markers and formatting that could break prompt boundaries. Rejected inputs are logged silently (no information leakage to attacker).
+- **Output validation** -- AI output is validated against the skill's JSON schema. Type checks, range enforcement, required fields. Invalid output is rejected.
+- **Rate limiting** -- per-user, per-minute limits on operator interactions prevent abuse.
+- **Channel security** -- allowed user lists, input length limits, and markdown stripping are enforced at startup. The engine refuses to start without security configuration.
+
+## How It Works
 
 FixClaw runs pipelines. Each pipeline is a sequence of typed steps:
 
@@ -50,9 +51,7 @@ FixClaw runs pipelines. Each pipeline is a sequence of typed steps:
 |---|---|
 | `deterministic` | Plain code: fetch emails, filter, route, notify |
 | `ai` | LLM inference with a skill template, budget-checked |
-| `approval` | Human-in-the-loop: operator reviews via Slack before proceeding |
-
-**AI never executes.** The LLM produces text. Deterministic code validates the output against a schema and decides what happens next.
+| `approval` | Human-in-the-loop: operator reviews before proceeding |
 
 Example pipeline:
 
@@ -74,19 +73,15 @@ pipelines:
         action: notify
 ```
 
-## Guardrails
+## Architecture
 
-- **Token budgets**: per-step, per-pipeline, and per-day limits. Exceeding any budget halts the pipeline.
-- **Rate limiting**: per-user, per-minute limits on operator interactions.
-- **Input sanitization**: strips markdown and detects prompt injection patterns before forwarding to the LLM.
-- **Output validation**: AI output is validated against the skill's output schema. Invalid output is rejected.
-- **Human-in-the-loop**: approval steps present AI output to the operator via Slack with approve/edit/reject buttons. Nothing leaves the system without explicit approval.
+![Architecture](architecture.png)
 
 ## Configuration
 
 ### config.yaml
 
-Defines your LLM providers, models, token budgets, and pipelines.
+Defines LLM providers, models, token budgets, and pipelines.
 
 ```yaml
 provider:
@@ -112,13 +107,6 @@ budgets:
 
 Private values that stay out of version control. Copy `secrets.yaml.example` to get started.
 
-```yaml
-# secrets.yaml.example
-slack:
-  channel_id: C0123456789
-  allowed_users: [U0123456789]
-```
-
 ### Skills
 
 YAML prompt templates in `skills/`. Each skill defines the system prompt, input variables, and optional output schema for validation.
@@ -140,18 +128,15 @@ output_schema:
   required: [match, reason, score]
 ```
 
-## Project structure
+## Project Structure
 
 ```
 fixclaw/
-  main.go          # Engine: pipeline runner, Slack bot, scheduler, guardrails
-  gmail.go         # Microsoft 365 / Gmail integration (OAuth 2.0, read + send with HITL approval)
+  main.go          # Engine: pipeline runner, operator bot, scheduler, guardrails
+  gmail.go         # Gmail / Microsoft 365 integration (OAuth 2.0, read + send with HITL approval)
   config.yaml      # Pipelines, models, budgets, timeouts
-  secrets.yaml     # Private config (operator IDs) — gitignored
-  skills/
-    classify-job.yaml    # Job classification prompt template
-    draft-followup.yaml  # Follow-up email drafter
-    email-digest.yaml    # Unread email summarizer
+  secrets.yaml     # Private config (operator IDs) -- gitignored
+  skills/          # Prompt templates with schema validation
 ```
 
 ## License
