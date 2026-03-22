@@ -1,39 +1,12 @@
 # FixClaw
 
-**AI automation for business operations — with governance built in.**
+AI automation for business operations -- with governance built in.
 
-```yaml
-# config.yaml — this is all you write
-pipelines:
-  - name: email-digest
-    schedule: 30m
-    steps:
-      - name: fetch-unread
-        type: deterministic          # plain code: fetch, filter, route
-        action: email_unread
-      - name: summarize
-        type: ai                     # LLM call: budget-checked, schema-validated
-        skill: email-digest
-      - name: approve
-        type: approval               # human reviews before anything goes out
-      - name: report
-        type: deterministic
-        action: notify
-```
+FixClaw is a pipeline engine written in Go that puts AI to work on real operations workflows (email triage, customer follow-ups, job classification) while enforcing token budgets, audit trails, input sanitization, and human-in-the-loop approval on every outbound action.
 
-```
-Inbox (200 emails) → FixClaw pipeline → AI summary → Slack approval → you approve → sent
-                                  ↑                         ↑
-                           budget-checked            nothing leaves
-                           schema-validated          without sign-off
-```
+**AI never executes. Deterministic code does.**
 
-**Deterministic first. AI is only used for judgment calls — classification, drafting, summarization. Code handles everything else.**
-
-[![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go&logoColor=white)](https://go.dev)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-
----
+![Slack approval flow](demo.gif)
 
 ## Quickstart
 
@@ -79,6 +52,26 @@ FixClaw runs pipelines. Each pipeline is a sequence of typed steps:
 | `deterministic` | Plain code: fetch emails, filter, route, notify |
 | `ai` | LLM inference with a skill template, budget-checked |
 | `approval` | Human-in-the-loop: operator reviews before proceeding |
+
+Example pipeline:
+
+```yaml
+pipelines:
+  - name: email-digest
+    schedule: 30m
+    steps:
+      - name: fetch-unread
+        type: deterministic
+        action: email_unread
+
+      - name: summarize
+        type: ai
+        skill: email-digest
+
+      - name: report
+        type: deterministic
+        action: notify
+```
 
 ## Architecture
 
@@ -145,14 +138,6 @@ fixclaw/
   secrets.yaml     # Private config (operator IDs) -- gitignored
   skills/          # Prompt templates with schema validation
 ```
-
-## Contributing
-
-Contributions welcome. Check the [issues](https://github.com/renezander030/fixclaw/issues) for `good first issue` labels — they're scoped to be completable without understanding the full codebase.
-
-## Built by
-
-[Rene Zander](https://dev.to/reneza) — I build AI automation systems for operations teams. If you need something like FixClaw customized for your business, [book a call](https://cal.eu/reneza).
 
 ## License
 
