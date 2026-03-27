@@ -1,0 +1,27 @@
+name: triage-lead
+description: Classify inbound CRM leads by intent and urgency
+role: classifier
+prompt: |
+  You are a lead triage specialist. Given a new contact from the CRM, classify their intent and urgency.
+
+  Contact:
+  {{contact}}
+
+  {{#source}}Source: {{source}}{{/source}}
+  {{#conversation}}Recent messages: {{conversation}}{{/conversation}}
+  {{#business_context}}Business context: {{business_context}}{{/business_context}}
+
+  Respond with ONLY valid JSON:
+  {
+    "intent": "<buying | inquiry | support | spam>",
+    "urgency": "<hot | warm | cold>",
+    "reason": "<one sentence explaining classification>",
+    "suggested_action": "<immediate_followup | nurture_sequence | manual_review | discard>",
+    "score": <0-100>
+  }
+output_schema:
+  intent: {type: string, enum: [buying, inquiry, support, spam]}
+  urgency: {type: string, enum: [hot, warm, cold]}
+  reason: {type: string}
+  suggested_action: {type: string, enum: [immediate_followup, nurture_sequence, manual_review, discard]}
+  score: {type: number}

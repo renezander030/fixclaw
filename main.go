@@ -24,6 +24,7 @@ import (
 type Config struct {
 	Telegram    TelegramConfig         `yaml:"telegram"`
 	Gmail       GmailConfig            `yaml:"gmail"`
+	GHL         GHLConfig              `yaml:"gohighlevel"`
 	Provider    ProviderConfig         `yaml:"provider"`
 	Models      map[string]ModelConfig `yaml:"models"`
 	Roles       map[string]string      `yaml:"roles"`
@@ -997,6 +998,60 @@ Description: We need an experienced LLM engineer to build a retrieval-augmented 
 					ch.Send(header + msg)
 				}
 
+			case "ghl_new_contacts":
+				if ghl == nil {
+					return fmt.Errorf("[step:%s] ghl connector not configured", step.Name)
+				}
+				hours := 24
+				contacts, err := ghl.FetchRecentContacts(hours, 20)
+				if err != nil {
+					return fmt.Errorf("[step:%s] ghl fetch contacts failed: %w", step.Name, err)
+				}
+				if len(contacts) == 0 {
+					log.Printf("[pipeline:%s][step:%s] no new contacts, skipping pipeline", pipeline.Name, step.Name)
+					return nil
+				}
+				data["contacts"] = FormatContactsForPrompt(contacts)
+				data["contact_count"] = fmt.Sprintf("%d", len(contacts))
+				log.Printf("[pipeline:%s][step:%s] fetched %d new contacts", pipeline.Name, step.Name, len(contacts))
+
+			case "ghl_stale_opportunities":
+				if ghl == nil {
+					return fmt.Errorf("[step:%s] ghl connector not configured", step.Name)
+				}
+				pipelineID, _ := step.Vars["pipeline_id"]
+				if pipelineID == "" {
+					return fmt.Errorf("[step:%s] ghl_stale_opportunities requires pipeline_id var", step.Name)
+				}
+				staleDays := 7
+				opps, err := ghl.FetchStaleOpportunities(pipelineID, staleDays, 20)
+				if err != nil {
+					return fmt.Errorf("[step:%s] ghl fetch stale opportunities failed: %w", step.Name, err)
+				}
+				if len(opps) == 0 {
+					log.Printf("[pipeline:%s][step:%s] no stale opportunities, skipping pipeline", pipeline.Name, step.Name)
+					return nil
+				}
+				data["opportunities"] = FormatOpportunitiesForPrompt(opps)
+				data["opportunity_count"] = fmt.Sprintf("%d", len(opps))
+				log.Printf("[pipeline:%s][step:%s] fetched %d stale opportunities", pipeline.Name, step.Name, len(opps))
+
+			case "ghl_unread_conversations":
+				if ghl == nil {
+					return fmt.Errorf("[step:%s] ghl connector not configured", step.Name)
+				}
+				convos, err := ghl.FetchUnreadConversations(20)
+				if err != nil {
+					return fmt.Errorf("[step:%s] ghl fetch conversations failed: %w", step.Name, err)
+				}
+				if len(convos) == 0 {
+					log.Printf("[pipeline:%s][step:%s] no unread conversations, skipping pipeline", pipeline.Name, step.Name)
+					return nil
+				}
+				data["conversations"] = FormatConversationsForPrompt(convos)
+				data["conversation_count"] = fmt.Sprintf("%d", len(convos))
+				log.Printf("[pipeline:%s][step:%s] fetched %d unread conversations", pipeline.Name, step.Name, len(convos))
+
 			default:
 				// No action — pass-through
 			}
@@ -1157,6 +1212,7 @@ Description: We need an experienced LLM engineer to build a retrieval-augmented 
 // Handles operator commands like /cron, /skills, /run, /status
 
 var gmail *GmailConnector       // initialized in main if configured
+var ghl   *GHLConnector         // initialized in main if configured
 var lastEmails []Email          // last fetched emails for /reply reference
 var lastEmailsMu sync.Mutex
 
@@ -1779,6 +1835,15 @@ func main() {
 		gmail, err = NewGmailConnector(cfg.Gmail.TokenPath)
 		if err != nil {
 			log.Printf("[gmail] WARNING: failed to initialize: %v", err)
+		}
+	}
+
+	// Init GoHighLevel connector if configured
+	if cfg.GHL.TokenPath != "" || cfg.GHL.APIKeyEnv != "" {
+		var err error
+		ghl, err = NewGHLConnector(cfg.GHL)
+		if err != nil {
+			log.Printf("[ghl] WARNING: failed to initialize: %v", err)
 		}
 	}
 

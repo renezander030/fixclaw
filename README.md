@@ -1,8 +1,8 @@
 # FixClaw
 
-AI automation for business operations -- with governance built in.
+AI communication management for service businesses -- with governance built in.
 
-FixClaw is a pipeline engine written in Go that puts AI to work on real operations workflows (email triage, customer follow-ups, job classification) while enforcing token budgets, audit trails, input sanitization, and human-in-the-loop approval on every outbound action.
+FixClaw is a pipeline engine written in Go that puts AI to work on real communication workflows (email triage, CRM lead follow-ups, opportunity recovery) while enforcing token budgets, audit trails, input sanitization, and human-in-the-loop approval on every outbound action.
 
 **AI never executes. Deterministic code does.**
 
@@ -20,7 +20,17 @@ Define your pipelines in `config.yaml`, your prompts in `skills/`, and FixClaw h
 
 ## Why FixClaw
 
-Operations teams use AI assistants for personal productivity. But when AI output touches customers, contracts, or compliance, you need more than a chatbot.
+Service businesses run on communication -- emails, CRM follow-ups, lead qualification. AI can handle the volume, but when AI output touches real customers, you need guardrails.
+
+## Integrations
+
+| Platform | What FixClaw does |
+|---|---|
+| **Gmail / Microsoft 365** | Email triage, AI-drafted replies, digest summaries |
+| **GoHighLevel** | Lead triage, stale opportunity recovery, conversation follow-ups |
+| **Slack / Telegram** | Operator approval channel (human-in-the-loop) |
+
+More connectors can be added by implementing a single Go file. Each integration follows the same pattern: fetch data, classify with AI, draft a response, get human approval before sending.
 
 | | **Claude Dispatch** | **OpenClaw** | **FixClaw** |
 |---|---|---|---|
@@ -53,16 +63,17 @@ FixClaw runs pipelines. Each pipeline is a sequence of typed steps:
 | `ai` | LLM inference with a skill template, budget-checked |
 | `approval` | Human-in-the-loop: operator reviews before proceeding |
 
-Example pipeline:
+Example pipelines:
 
 ```yaml
 pipelines:
+  # Email digest -- summarize unread emails every 30 minutes
   - name: email-digest
     schedule: 30m
     steps:
       - name: fetch-unread
         type: deterministic
-        action: email_unread
+        action: gmail_unread
 
       - name: summarize
         type: ai
@@ -71,6 +82,42 @@ pipelines:
       - name: report
         type: deterministic
         action: notify
+
+  # Lead triage -- classify new CRM contacts hourly
+  - name: lead-triage
+    schedule: 1h
+    steps:
+      - name: fetch-contacts
+        type: deterministic
+        action: ghl_new_contacts
+
+      - name: classify
+        type: ai
+        skill: triage-lead
+
+      - name: review
+        type: approval
+        mode: hitl
+        channel: telegram
+
+  # Opportunity recovery -- re-engage stale deals daily
+  - name: opportunity-recovery
+    schedule: 24h
+    steps:
+      - name: fetch-stale
+        type: deterministic
+        action: ghl_stale_opportunities
+        vars:
+          pipeline_id: your-pipeline-id
+
+      - name: draft-followup
+        type: ai
+        skill: draft-ghl-followup
+
+      - name: approve-send
+        type: approval
+        mode: hitl
+        channel: telegram
 ```
 
 ## Architecture
@@ -133,10 +180,16 @@ output_schema:
 ```
 fixclaw/
   main.go          # Engine: pipeline runner, operator bot, scheduler, guardrails
-  gmail.go         # Gmail / Microsoft 365 integration (OAuth 2.0, read + send with HITL approval)
+  gmail.go         # Gmail / Microsoft 365 integration (OAuth 2.0, read + send)
+  gohighlevel.go   # GoHighLevel CRM integration (contacts, opportunities, conversations)
   config.yaml      # Pipelines, models, budgets, timeouts
   secrets.yaml     # Private config (operator IDs) -- gitignored
   skills/          # Prompt templates with schema validation
+    email-digest.yaml
+    classify-job.yaml
+    draft-followup.yaml
+    triage-lead.yaml
+    draft-ghl-followup.yaml
 ```
 
 ## License

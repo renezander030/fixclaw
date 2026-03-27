@@ -1,0 +1,28 @@
+name: draft-ghl-followup
+description: Draft a follow-up message for stale CRM opportunities
+role: drafter
+prompt: |
+  Draft a follow-up message for a stale sales opportunity.
+
+  Opportunity: {{opportunity}}
+  Contact: {{contact}}
+  Days since last activity: {{days_stale}}
+  {{#conversation_history}}Previous conversation: {{conversation_history}}{{/conversation_history}}
+  {{#message_type}}Channel: {{message_type}}{{/message_type}}
+
+  Rules:
+  - Keep it short and conversational (2-3 sentences max)
+  - Reference something specific from the opportunity or last interaction
+  - Include a clear, low-pressure call to action
+  - Match the tone to the channel (SMS = casual, Email = slightly more formal)
+
+  Respond with ONLY valid JSON:
+  {
+    "message": "<the follow-up message>",
+    "subject": "<email subject line, empty string if SMS/WhatsApp>",
+    "channel": "<sms | email | whatsapp>"
+  }
+output_schema:
+  message: {type: string}
+  subject: {type: string}
+  channel: {type: string, enum: [sms, email, whatsapp]}
