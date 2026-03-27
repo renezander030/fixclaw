@@ -1,6 +1,16 @@
-# FixClaw
+<p align="center">
+  <img src="logo.svg" alt="FixClaw" width="200">
+</p>
 
-AI communication management for service businesses -- with governance built in.
+<h1 align="center">FixClaw</h1>
+<p align="center">AI communication management for service businesses -- with governance built in.</p>
+
+<p align="center">
+  <a href="https://github.com/renezander030/fixclaw/stargazers"><img src="https://img.shields.io/github/stars/renezander030/fixclaw?style=flat-square" alt="Stars"></a>
+  <a href="https://github.com/renezander030/fixclaw/blob/master/LICENSE"><img src="https://img.shields.io/github/license/renezander030/fixclaw?style=flat-square" alt="License"></a>
+  <img src="https://img.shields.io/badge/Go-1.24-00ADD8?style=flat-square&logo=go" alt="Go 1.24">
+  <img src="https://img.shields.io/badge/build-passing-brightgreen?style=flat-square" alt="Build">
+</p>
 
 FixClaw is a pipeline engine written in Go that puts AI to work on real communication workflows (email triage, CRM lead follow-ups, opportunity recovery) while enforcing token budgets, audit trails, input sanitization, and human-in-the-loop approval on every outbound action.
 
@@ -191,6 +201,12 @@ fixclaw/
     triage-lead.yaml
     draft-ghl-followup.yaml
 ```
+
+## Star History
+
+If FixClaw is useful to you, consider giving it a star. It helps others discover the project.
+
+[![Star History Chart](https://api.star-history.com/svg?repos=renezander030/fixclaw&type=Date)](https://star-history.com/#renezander030/fixclaw&Date)
 
 ## License
 

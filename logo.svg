@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" fill="none">
+  <!-- Claw mark -->
+  <g stroke="#00D4AA" stroke-width="6" stroke-linecap="round">
+    <path d="M 80 40 Q 95 100 75 160"/>
+    <path d="M 100 35 Q 115 100 95 165"/>
+    <path d="M 120 40 Q 135 100 115 160"/>
+  </g>
+  <!-- Text -->
+  <text x="155" y="125" font-family="monospace" font-size="64" font-weight="bold" fill="#E6EDF3">Fix</text>
+  <text x="260" y="125" font-family="monospace" font-size="64" font-weight="bold" fill="#00D4AA">Claw</text>
+  <!-- Tagline -->
+  <text x="155" y="155" font-family="monospace" font-size="14" fill="#8B949E">AI communication management</text>
+</svg>
