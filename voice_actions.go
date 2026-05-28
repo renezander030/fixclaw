@@ -13,6 +13,35 @@ import (
 )
 
 func tryVoiceAction(action, pipelineName string, vars map[string]string, data map[string]interface{}) (handled bool, skipPipeline bool, err error) {
+	// Admin actions: no voiceServer dependency (git is local, Dograh HTTP is
+	// configured separately). Keep them at the top so the guardrail pipeline
+	// runs even before any session has been recorded.
+	switch action {
+	case "git_commit_workflow_update":
+		sha, err := gitCommitWorkflow(vars, data)
+		if err != nil {
+			return true, false, err
+		}
+		data["voice_admin_commit_sha"] = sha
+		return true, false, nil
+
+	case "dograh_staging_smoke":
+		runID, err := dograhTriggerRun(setEnv(vars, "staging"), data)
+		if err != nil {
+			return true, false, err
+		}
+		data["voice_admin_smoke_run_id"] = runID
+		return true, false, nil
+
+	case "dograh_prod_publish":
+		if err := dograhUpdateWorkflow(vars, data); err != nil {
+			return true, false, err
+		}
+		data["voice_admin_publish_status"] = "ok"
+		return true, false, nil
+	}
+
+	// Harvest actions: require voiceServer (need the voice store).
 	if voiceServer == nil {
 		return false, false, nil
 	}
@@ -160,6 +189,18 @@ func formatLearningsForPrompt(items []voice.NewLearning) string {
 		fmt.Fprintf(&sb, "description: %s\n\n", l.Description)
 	}
 	return sb.String()
+}
+
+// setEnv returns a copy of vars with "env" forced to the given value. Used to
+// route the same dograh_trigger_run helper at staging vs prod from different
+// action names.
+func setEnv(vars map[string]string, env string) map[string]string {
+	out := make(map[string]string, len(vars)+1)
+	for k, v := range vars {
+		out[k] = v
+	}
+	out["env"] = env
+	return out
 }
 
 func varInt(vars map[string]string, key string, def int) int {

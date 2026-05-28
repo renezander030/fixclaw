@@ -1,0 +1,85 @@
+# 7-step Learning-Item review guardrail for the DACH voice screener.
+#
+# Reads new Learning-Items emitted by Dograh during calls, groups similar
+# ones, proposes a prompt / workflow / KB update, gates the diff behind
+# operator approval, commits to the workflow git repo, runs a smoke call
+# against Dograh staging, gates the deploy behind a second approval, then
+# publishes via Dograh's PUT /api/v1/workflow/{id} (auto-versioned).
+#
+# Requires draftyard built with -tags voice. Set:
+#   DRAFTYARD_VOICE_TOKEN  (webhook auth, shared with Dograh)
+#   DOGRAH_API_KEY         (auth for Dograh REST API)
+#   voice.dograh.base_url + voice.dograh.staging_url in config.yaml
+
+pipelines:
+  - name: voice-guardrail-review
+    schedule: 1h
+    steps:
+      # Step 1 of 7 (case-study mapping): Learning-Item written.
+      # Already handled by the POST /voice/learning receiver while calls run.
+      # Here we harvest the new ones for review.
+      - name: harvest-learnings
+        type: deterministic
+        action: voice_learnings_new
+        vars:
+          limit: "100"
+
+      # Step 2: group similar items.
+      - name: group-similar
+        type: ai
+        skill: group-learning-items
+
+      # Step 3: review.
+      - name: review-grouping
+        type: approval
+        mode: hitl
+        channel: telegram
+
+      # Step 4 + Step 5: propose update + version bump. The AI step emits a
+      # proposed workflow_definition + a target workflow_id / workflow_uuid +
+      # a commit_message. Dograh auto-versions on PUT, so step 5 (Versionsstand
+      # ändern) is implicit in the publish action below.
+      - name: propose-update
+        type: ai
+        skill: propose-prompt-update
+
+      - name: approve-diff
+        type: approval
+        mode: hitl
+        channel: telegram
+
+      # Persist the change to disk + git. The committed file is the same path
+      # dograh_prod_publish reads later, so the repo is the source of truth.
+      - name: commit
+        type: deterministic
+        action: git_commit_workflow_update
+        vars:
+          path: workflows/dach-screener.json
+          content_var: proposed_definition
+          message_var: commit_message
+          repo_dir: /var/lib/dograh-workflows
+
+      # Step 6: test against staging.
+      - name: smoke
+        type: deterministic
+        action: dograh_staging_smoke
+        vars:
+          workflow_uuid_var: workflow_uuid
+
+      - name: approve-deploy
+        type: approval
+        mode: hitl
+        channel: telegram
+
+      # Step 7: publish to prod. PUT to Dograh auto-creates a new versioned
+      # workflow_definition while preserving prior versions.
+      - name: publish
+        type: deterministic
+        action: dograh_prod_publish
+        vars:
+          workflow_id_var: workflow_id
+          definition_path: /var/lib/dograh-workflows/workflows/dach-screener.json
+
+      - name: notify-done
+        type: deterministic
+        action: notify

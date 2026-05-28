@@ -11,7 +11,10 @@ import (
 	"github.com/renezander030/draftyard/voice"
 )
 
-var voiceServer *voice.Server
+var (
+	voiceServer *voice.Server
+	voiceCfg    voice.Config
+)
 
 func bootVoice(cfg *Config, st *StateStore) {
 	if st == nil {
@@ -25,6 +28,7 @@ func bootVoice(cfg *Config, st *StateStore) {
 	if !vcfg.Enabled {
 		return
 	}
+	voiceCfg = vcfg
 	srv, err := voice.NewServer(vcfg, st.DB())
 	if err != nil {
 		log.Printf("[voice] init failed: %v", err)

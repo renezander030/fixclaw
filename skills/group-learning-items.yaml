@@ -1,0 +1,21 @@
+name: group-learning-items
+description: Cluster new voice-AI Learning-Items by topic so the operator reviews groups, not individual rows
+role: voice-analyst
+prompt: |
+  You are reviewing {{voice_learning_count}} new Learning-Items emitted by the
+  voice agent over the last review window. Cluster items that describe the
+  same underlying gap (e.g. "agent did not know our VPC pricing", "caller
+  asked about VPC pricing twice"). Return a compact summary for the operator.
+
+  Learning-Items:
+  {{voice_learnings}}
+
+  Respond with ONLY valid JSON:
+  - groups_json: JSON string of an array of {topic, learning_ids, count, suggestion}
+  - top_priority: single-sentence pointer to the most impactful group
+  - groups_count: integer
+
+output_schema:
+  groups_json:    {type: string}
+  top_priority:   {type: string}
+  groups_count:   {type: int}

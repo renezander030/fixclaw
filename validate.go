@@ -410,6 +410,8 @@ func isCommonDataKey(k string) bool {
 		"voice_handoffs", "voice_handoff_count",
 		"voice_handoffs_resolved_count",
 		"voice_learnings", "voice_learning_count",
+		"voice_admin_commit_sha", "voice_admin_smoke_run_id", "voice_admin_publish_status",
+		"workflow_id", "workflow_uuid",
 		"ai_output", "ai_raw", "approved":
 		return true
 	}

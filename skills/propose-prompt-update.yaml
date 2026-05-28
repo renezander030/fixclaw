@@ -1,0 +1,24 @@
+name: propose-prompt-update
+description: Propose a workflow_definition diff that addresses the grouped Learning-Items
+role: voice-analyst
+prompt: |
+  Based on the grouped Learning-Items below and the operator's approval to act,
+  propose a minimal, surgical change to the voice workflow definition. Do not
+  rewrite the whole graph. Touch only the agentNode prompts or branching edges
+  that fix the highest-priority group.
+
+  Grouped items:
+  {{ai_output}}
+
+  Respond with ONLY valid JSON containing these top-level keys:
+  - workflow_id: integer (the Dograh workflow_id to update)
+  - workflow_uuid: string (used for the staging smoke run)
+  - proposed_definition: object {"nodes": [...], "edges": [...]} (the full
+    updated definition; Dograh PUT auto-versions on receipt)
+  - commit_message: short imperative git commit message describing the diff
+
+output_schema:
+  workflow_id:         {type: int}
+  workflow_uuid:       {type: string}
+  proposed_definition: {type: string}
+  commit_message:      {type: string}

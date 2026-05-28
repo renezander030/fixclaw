@@ -21,8 +21,9 @@ type AuthConfig struct {
 }
 
 type DograhConfig struct {
-	BaseURL   string `yaml:"base_url"`
-	APIKeyEnv string `yaml:"api_key_env"`
+	BaseURL    string `yaml:"base_url"`    // prod
+	StagingURL string `yaml:"staging_url"` // staging
+	APIKeyEnv  string `yaml:"api_key_env"`
 }
 
 type PreCallConfig struct {
