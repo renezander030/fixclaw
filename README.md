@@ -273,7 +273,24 @@ The deterministic-boundary architecture is documented in the **Production AI Aut
 
 **v0.1** — early access. Single-business, single-operator deployments. Public APIs may change between minor versions until v1.0.
 
-Roadmap signals: webhook triggers, generic HTTP actions, per-step retry & circuit breaker, Slack approval channel, structured JSON logging + Prometheus metrics, Google Sheets connector. Voice plugin v0.2: outbound campaigns (consent-gated), recording redaction, MCP bridge for Dograh-driven workflows.
+### Roadmap signals
+
+Core engine:
+- Webhook triggers (currently pipelines are scheduled-only)
+- Generic HTTP action (drop-in for any REST integration not yet first-class)
+- Per-step retry + circuit breaker
+- Slack approval channel (Telegram is shipping today)
+- Structured JSON logging + Prometheus metrics endpoint
+- Google Sheets connector
+
+Voice plugin v0.2 (planned):
+- **Outbound calling campaigns** with consent gating (TCPA-aware in the US, DSGVO + UWG-aware in DE/AT/CH)
+- **Recording redaction** (PII masking before audio + transcript hit persistent storage)
+- **MCP bridge** so Dograh agents can call draftyard tools mid-conversation (parity with Dograh's recent MCP server release)
+- **Real-Dograh integration verification** against a live instance once a paying deployment lands
+
+Operational deliverables (separate repos, not in draftyard):
+- `dograh-stackit` — Terraform + Ansible for reproducible STACKIT / PlusServer / IONOS / Hetzner / OVHcloud / Open Telekom Cloud deployment of the full voice stack (CPU VM for draftyard, GPU VM for Dograh + Whisper + vLLM + XTTS, 300 GB persistent model volume, Caddy TLS, smoke + warm-benchmark + attestation scripts)
 
 ## Star History
 
