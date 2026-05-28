@@ -34,6 +34,9 @@ type Config struct {
 	Budgets   BudgetConfig           `yaml:"budgets"`
 	Timeouts  TimeoutConfig          `yaml:"timeouts"`
 	Pipelines []PipelineConfig       `yaml:"pipelines"`
+	// Voice is parsed unconditionally as raw YAML. Decoded into voice.Config
+	// only when draftyard is built with -tags voice. Lean builds ignore it.
+	Voice yaml.Node `yaml:"voice"`
 }
 
 // StateConfig points at the SQLite file used for cross-run state (dedup +
@@ -75,6 +78,8 @@ type BudgetConfig struct {
 	PerStepTokens     int `yaml:"per_step_tokens"`
 	PerPipelineTokens int `yaml:"per_pipeline_tokens"`
 	PerDayTokens      int `yaml:"per_day_tokens"`
+	PerDayCalls       int `yaml:"per_day_calls"`
+	PerDayCallMinutes int `yaml:"per_day_call_minutes"`
 }
 
 type TimeoutConfig struct {
@@ -277,14 +282,22 @@ func (s *Scheduler) GetDue() []string {
 type BudgetTracker struct {
 	tokensUsedToday    int
 	tokensUsedPipeline int
+	callsToday         int
+	callMinutesToday   int
 	dayStart           time.Time
 }
 
-func (b *BudgetTracker) check(limit int, requested int) error {
+func (b *BudgetTracker) resetIfNewDay() {
 	if b.dayStart.Day() != time.Now().Day() {
 		b.tokensUsedToday = 0
+		b.callsToday = 0
+		b.callMinutesToday = 0
 		b.dayStart = time.Now()
 	}
+}
+
+func (b *BudgetTracker) check(limit int, requested int) error {
+	b.resetIfNewDay()
 	if b.tokensUsedToday+requested > limit {
 		return fmt.Errorf("BUDGET_BLOCKED: daily token limit %d would be exceeded (used: %d, requested: %d)", limit, b.tokensUsedToday, requested)
 	}
@@ -294,6 +307,28 @@ func (b *BudgetTracker) check(limit int, requested int) error {
 func (b *BudgetTracker) record(tokens int) {
 	b.tokensUsedToday += tokens
 	b.tokensUsedPipeline += tokens
+}
+
+func (b *BudgetTracker) CheckCalls(limit int) error {
+	b.resetIfNewDay()
+	if limit > 0 && b.callsToday+1 > limit {
+		return fmt.Errorf("BUDGET_BLOCKED: daily call limit %d would be exceeded (used: %d)", limit, b.callsToday)
+	}
+	return nil
+}
+
+func (b *BudgetTracker) CheckCallMinutes(limit, requestedMinutes int) error {
+	b.resetIfNewDay()
+	if limit > 0 && b.callMinutesToday+requestedMinutes > limit {
+		return fmt.Errorf("BUDGET_BLOCKED: daily call-minute limit %d would be exceeded (used: %d, requested: %d)", limit, b.callMinutesToday, requestedMinutes)
+	}
+	return nil
+}
+
+func (b *BudgetTracker) RecordCall(durationMinutes int) {
+	b.resetIfNewDay()
+	b.callsToday++
+	b.callMinutesToday += durationMinutes
 }
 
 // --- Input Security ---
@@ -1141,7 +1176,17 @@ Description: We need an experienced LLM engineer to build a retrieval-augmented 
 				}
 
 			default:
-				// No action — pass-through
+				// Voice plugin actions (no-op in lean builds)
+				if handled, skip, err := tryVoiceAction(step.Action, pipeline.Name, step.Vars, data); handled {
+					if err != nil {
+						return fmt.Errorf("[step:%s] %w", step.Name, err)
+					}
+					if skip {
+						log.Printf("[pipeline:%s][step:%s] %s: no items, skipping pipeline", pipeline.Name, step.Name, step.Action)
+						return nil
+					}
+				}
+				// else pass-through
 			}
 
 		case "ai":
@@ -1976,6 +2021,10 @@ func main() {
 		defer state.Close()
 		log.Printf("[state] opened %s", statePath)
 	}
+
+	// Voice plugin (build-tag voice). No-op in lean builds.
+	bootVoice(&cfg, state)
+	defer shutdownVoice()
 
 	// Init scheduler
 	sched := newScheduler(cfg.Pipelines)

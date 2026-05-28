@@ -406,6 +406,9 @@ func isCommonDataKey(k string) bool {
 	switch k {
 	case "input", "emails", "email_count", "contacts", "contact_count",
 		"opportunities", "opportunity_count", "conversations", "conversation_count",
+		"voice_calls", "voice_call_count",
+		"voice_handoffs", "voice_handoff_count",
+		"voice_learnings", "voice_learning_count",
 		"ai_output", "ai_raw", "approved":
 		return true
 	}

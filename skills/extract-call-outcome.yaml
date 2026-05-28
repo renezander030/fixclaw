@@ -1,0 +1,22 @@
+name: extract-call-outcome
+description: Extract a structured per-batch summary from completed voice calls
+role: voice-analyst
+prompt: |
+  You are reviewing {{voice_call_count}} completed voice calls from a DACH
+  customer screening workflow. Decide for the batch as a whole whether the
+  operator should act now, and produce a JSON-encoded array of per-call
+  decisions that downstream pipelines can consume.
+
+  Calls:
+  {{voice_calls}}
+
+  Respond with ONLY valid JSON with these keys:
+  - summary: one-line operator-facing summary of the batch
+  - decisions_json: JSON string of an array, one entry per call, each with
+    {session_id, decision (qualified|disqualified|needs_review), reason, next_action}
+  - urgent: true if any call requires same-day operator action, else false
+
+output_schema:
+  summary:        {type: string}
+  decisions_json: {type: string}
+  urgent:         {type: bool}

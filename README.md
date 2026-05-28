@@ -97,8 +97,21 @@ pipelines:
 | `pdf_extract`                | Parse a PDF into text + per-fragment bounding boxes (pure-Go)             |
 | `pdf_verify_cite`            | Resolve `<cite>` tags in AI output against the parsed PDF                 |
 | `notify`                     | Send AI output to the operator channel                                    |
+| `voice_calls_completed`      | Harvest completed voice calls from the writeback layer (requires `-tags voice`) |
+| `voice_handoffs_pending`     | Harvest unresolved handoff requests (requires `-tags voice`)              |
+| `voice_learnings_new`        | Harvest agent-flagged Learning-Items for the 7-step review (requires `-tags voice`) |
 
 Add a new action by appending a `case` to the deterministic switch in `main.go` and registering its name in `validate.go`. See `gohighlevel.go` for the connector pattern.
+
+### Voice (EU residency, build tag `voice`)
+
+Optional plugin that turns draftyard into the **EU-resident governance and writeback layer** for a self-hosted voice-AI stack (Dograh as the reference orchestrator). The plugin adds an HTTP receiver for 5 session lifecycle webhooks plus a pre-call context lookup endpoint, persists everything to the same SQLite state DB, and exposes 3 harvest actions that feed completed calls / handoffs / Learning-Items into normal draftyard pipelines (approval gate, schema validation, budget caps, audit log).
+
+```sh
+go build -tags voice -o draftyard
+```
+
+The lean binary is unchanged when the tag is off. See [`docs/voice.md`](docs/voice.md) for the wiring guide and [`fixtures/voice-dach-screener/pipeline.yaml`](fixtures/voice-dach-screener/pipeline.yaml) for a runnable example pipeline.
 
 ## State & idempotency
 

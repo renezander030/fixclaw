@@ -181,6 +181,15 @@ func (s *StateStore) Close() error {
 	return s.db.Close()
 }
 
+// DB returns the underlying *sql.DB so plugins (voice, etc.) can create their
+// own tables in the same SQLite file and share the same WAL journal.
+func (s *StateStore) DB() *sql.DB {
+	if s == nil {
+		return nil
+	}
+	return s.db
+}
+
 // dedupByID is a generic helper for fetch actions: extract IDs, filter to
 // unseen, mark all fetched IDs as seen. Returns the filtered slice. Failures
 // in the state layer log a warning but never block the pipeline — dedup
