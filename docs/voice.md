@@ -97,20 +97,34 @@ Example payload for `/voice/session_end` (Dograh template):
 
 ## Pipeline actions
 
-Three new actions are available in pipelines once draftyard is built with
-`-tags voice`:
+Seven new actions are available once draftyard is built with `-tags voice`.
 
-| Action                    | Yields                                        |
-| ------------------------- | --------------------------------------------- |
-| `voice_calls_completed`   | `data.voice_calls` (formatted), `data.voice_call_count` |
+### Harvest (deduped by record ID per `(pipeline, scope)`)
+
+| Action                    | Yields                                                  |
+| ------------------------- | ------------------------------------------------------- |
+| `voice_calls_completed`   | `data.voice_calls`, `data.voice_call_count`             |
 | `voice_handoffs_pending`  | `data.voice_handoffs`, `data.voice_handoff_count`       |
 | `voice_learnings_new`     | `data.voice_learnings`, `data.voice_learning_count`     |
 
-All three dedup by record ID per `(pipeline, scope)` via the standard
-`seen_items` mechanism, so each call/handoff/learning is processed at most
-once per pipeline.
+### Resolve
 
-See `fixtures/voice-dach-screener/pipeline.yaml` for a runnable example.
+| Action                    | Behavior                                                                                  |
+| ------------------------- | ----------------------------------------------------------------------------------------- |
+| `voice_handoffs_resolve`  | Reads `data.ai_output.resolutions[].{handoff_id, target}` and writes resolutions back to the voice store. Sets `data.voice_handoffs_resolved_count`. |
+
+### Admin (used by the 7-step guardrail pipeline)
+
+| Action                       | Behavior                                                                                                                |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `git_commit_workflow_update` | Optionally writes `data[content_var]` to `vars.path`, then `git add` + `git commit` in `vars.repo_dir`. Sets `data.voice_admin_commit_sha`. |
+| `dograh_staging_smoke`       | POST `/api/v1/public/agent/workflow/{workflow_uuid}` to `voice.dograh.staging_url`. Sets `data.voice_admin_smoke_run_id`. |
+| `dograh_prod_publish`        | PUT `/api/v1/workflow/{workflow_id}` to `voice.dograh.base_url` with the JSON read from `vars.definition_path`. Dograh auto-versions on PUT, preserving prior versions. Sets `data.voice_admin_publish_status`. |
+
+## Example pipelines
+
+- [`fixtures/voice-dach-screener/pipeline.yaml`](../fixtures/voice-dach-screener/pipeline.yaml) — DACH screening (harvest > extract > approve > notify).
+- [`fixtures/voice-dach-screener/guardrail.yaml`](../fixtures/voice-dach-screener/guardrail.yaml) — full 7-step Learning-Item review (harvest > group > approve > propose > approve-diff > commit > smoke > approve-deploy > publish > notify). Maps the case-study Guardrail flow onto draftyard's deterministic / ai / approval primitives plus the three admin actions above.
 
 ## State
 

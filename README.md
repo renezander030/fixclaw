@@ -11,20 +11,22 @@
   <img src="https://img.shields.io/badge/Go-1.24-00ADD8?style=flat-square&logo=go" alt="Go 1.24">
   <img src="https://img.shields.io/badge/release-v0.1-blueviolet?style=flat-square" alt="v0.1">
   <img src="https://img.shields.io/badge/build-passing-brightgreen?style=flat-square" alt="Build">
+  <a href="docs/voice.md"><img src="https://img.shields.io/badge/voice%20AI-EU%20residency%20%C2%B7%20Dograh-00D4AA?style=flat-square" alt="Voice AI plugin (EU residency, Dograh)"></a>
 </p>
 
 Draftyard runs YAML-defined pipelines that triage email, qualify leads, draft replies, extract data from PDFs, and govern self-hosted **voice AI** deployments. Every outbound action passes through an operator approval gate; every LLM call is budget-checked; every fetched item is deduped against a SQLite state store. Single Go binary.
 
 **AI suggests. Deterministic code decides. The operator signs off.**
 
-### Self-hosted voice AI for DACH (EU data residency, GDPR / NIS2)
+## Voice AI plugin: self-hosted, EU residency, Dograh + Pipecat
 
-Build with `-tags voice` to add the **EU-resident writeback layer** for self-hosted voice agents (Dograh, Pipecat, or any orchestrator that posts JSON webhooks). Use cases: AI calling, inbound qualification, sales screening, support deflection in DE / AT / CH, with audio + transcripts never leaving the chosen EU region (STACKIT Frankfurt, PlusServer, IONOS, Hetzner, OVHcloud, Open Telekom Cloud, or a client-owned VPC).
+Build with `-tags voice` to add the **EU-resident writeback + governance layer** for self-hosted voice agents (Dograh, Pipecat, or any orchestrator that posts JSON webhooks). Use cases: AI calling, inbound qualification, sales screening, support deflection in DE / AT / CH, with audio + transcripts never leaving the chosen EU region (STACKIT Frankfurt, PlusServer, IONOS, Hetzner, OVHcloud, Open Telekom Cloud, or a client-owned VPC).
 
 - **5 lifecycle webhook receivers** matching the published writeback contract: `session_start`, `event`, `session_end`, `handoff`, `learning`
 - **Pre-call context lookup** (sub-300ms p95) enriches the greeting from GHL / custom CRM HTTP before the agent speaks
-- **3 harvest pipeline actions** feed completed calls, pending handoffs, and Learning-Items into the standard approval > extract > write flow
-- **7-step Learning-Item review** before any prompt / workflow / knowledge-base change reaches production
+- **3 harvest + 1 resolve pipeline action** feed completed calls, pending handoffs, and Learning-Items into the standard approval > extract > write flow
+- **3 admin actions** drive Dograh's REST API directly: `git_commit_workflow_update`, `dograh_staging_smoke`, `dograh_prod_publish`
+- **7-step Learning-Item review pipeline** ([`fixtures/voice-dach-screener/guardrail.yaml`](fixtures/voice-dach-screener/guardrail.yaml)) before any prompt / workflow / knowledge-base change reaches production
 - **Per-day call + minute budgets** enforced at the engine level, parallel to the existing per-token caps
 - **Bearer-token webhook auth** with constant-time compare
 - **SQLite-backed audit** in the same state DB as the rest of draftyard
@@ -33,7 +35,19 @@ Build with `-tags voice` to add the **EU-resident writeback layer** for self-hos
 go build -tags voice -o draftyard
 ```
 
-Reference orchestrator: [Dograh](https://github.com/dograh-hq/dograh). The 5-endpoint writeback contract is intentionally orchestrator-agnostic, so Pipecat-direct or any future alternative drops in without rewriting the writeback layer. See [`docs/voice.md`](docs/voice.md) for the wiring recipe and [`fixtures/voice-dach-screener/pipeline.yaml`](fixtures/voice-dach-screener/pipeline.yaml) for a runnable DACH screening pipeline.
+Reference orchestrator: [Dograh](https://github.com/dograh-hq/dograh). The 5-endpoint writeback contract is intentionally orchestrator-agnostic, so Pipecat-direct or any future alternative drops in without rewriting the writeback layer. Full wiring recipe + Dograh-side webhook node templates: [`docs/voice.md`](docs/voice.md). Runnable fixtures: [DACH screening](fixtures/voice-dach-screener/pipeline.yaml), [7-step guardrail](fixtures/voice-dach-screener/guardrail.yaml).
+
+## Contents
+
+- [Why Draftyard vs the alternatives](#why-draftyard-vs-the-alternatives)
+- [Why this exists](#why-this-exists)
+- [Quickstart](#quickstart) — lean + voice builds
+- [How it works](#how-it-works)
+- [Built-in actions](#built-in-actions) — including all `voice_*` and `dograh_*` actions
+- [State & idempotency](#state--idempotency)
+- [Governance](#governance)
+- [Configuration](#configuration) — with `voice:` block example
+- [Commands](#commands)
 
 ## Why Draftyard vs the alternatives
 
@@ -48,6 +62,8 @@ Reference orchestrator: [Dograh](https://github.com/dograh-hq/dograh). The 5-end
 | **Config format**            | YAML (code-reviewable, gitable)                | Visual editor + JSON export                | Python code                         |
 | **Runtime**                  | Single Go binary                               | Node.js + Postgres                         | Python + dependency tree            |
 | **Approval channels**        | Telegram, Slack (WIP)                          | Webhook / email                            | None built-in                       |
+| **Voice AI integration**     | Built-in `voice` plugin: Dograh webhooks, pre-call lookup, 7-step Learning-Item guardrail | None                                       | None                                |
+| **EU data residency**        | Self-hosted Go binary, deploys on STACKIT / PlusServer / IONOS / Hetzner / OVHcloud / Open Telekom Cloud / client VPC | Self-host possible                         | Self-host possible                  |
 
 **Versus n8n**, Draftyard treats AI as the gated minority, not the default. n8n is a powerful no-code workflow tool with AI nodes bolted on; Draftyard is a code-first engine where every AI suggestion must pass schema validation and operator approval before it touches a customer. If you want drag-drop integrations across 400+ services, use n8n. If you want deterministic governance on a focused set of business ops, use Draftyard.
 
@@ -68,6 +84,14 @@ go build -o draftyard . && ./draftyard
 ```
 
 Define pipelines in `config.yaml`, prompts in `skills/`. The engine opens a SQLite state store at `./state.db` on first boot.
+
+**To enable the voice AI plugin** (Dograh webhook receivers, pre-call lookup, 7-step Learning-Item guardrail, EU residency wiring):
+
+```bash
+go build -tags voice -o draftyard . && ./draftyard
+```
+
+The lean binary is unchanged when the tag is off. See [`docs/voice.md`](docs/voice.md) for the full setup.
 
 ## How it works
 
@@ -115,21 +139,15 @@ pipelines:
 | `pdf_extract`                | Parse a PDF into text + per-fragment bounding boxes (pure-Go)             |
 | `pdf_verify_cite`            | Resolve `<cite>` tags in AI output against the parsed PDF                 |
 | `notify`                     | Send AI output to the operator channel                                    |
-| `voice_calls_completed`      | Harvest completed voice calls from the writeback layer (requires `-tags voice`) |
-| `voice_handoffs_pending`     | Harvest unresolved handoff requests (requires `-tags voice`)              |
-| `voice_learnings_new`        | Harvest agent-flagged Learning-Items for the 7-step review (requires `-tags voice`) |
+| `voice_calls_completed`      | Harvest completed voice calls from the Dograh writeback layer (`-tags voice`) |
+| `voice_handoffs_pending`     | Harvest unresolved handoff requests for human routing (`-tags voice`)     |
+| `voice_handoffs_resolve`     | Write `ai_output.resolutions[].{handoff_id, target}` back to the voice store (`-tags voice`) |
+| `voice_learnings_new`        | Harvest agent-flagged Learning-Items for the 7-step review (`-tags voice`) |
+| `git_commit_workflow_update` | Write `data[content_var]` to a workflow file + git add + commit (`-tags voice`) |
+| `dograh_staging_smoke`       | POST to Dograh's outbound-trigger endpoint to smoke-test a workflow version (`-tags voice`) |
+| `dograh_prod_publish`        | PUT a `workflow_definition` to Dograh prod (Dograh auto-versions on receipt) (`-tags voice`) |
 
-Add a new action by appending a `case` to the deterministic switch in `main.go` and registering its name in `validate.go`. See `gohighlevel.go` for the connector pattern.
-
-### Voice (EU residency, build tag `voice`)
-
-Optional plugin that turns draftyard into the **EU-resident governance and writeback layer** for a self-hosted voice-AI stack (Dograh as the reference orchestrator). The plugin adds an HTTP receiver for 5 session lifecycle webhooks plus a pre-call context lookup endpoint, persists everything to the same SQLite state DB, and exposes 3 harvest actions that feed completed calls / handoffs / Learning-Items into normal draftyard pipelines (approval gate, schema validation, budget caps, audit log).
-
-```sh
-go build -tags voice -o draftyard
-```
-
-The lean binary is unchanged when the tag is off. See [`docs/voice.md`](docs/voice.md) for the wiring guide and [`fixtures/voice-dach-screener/pipeline.yaml`](fixtures/voice-dach-screener/pipeline.yaml) for a runnable example pipeline.
+Add a new action by appending a `case` to the deterministic switch in `main.go` and registering its name in `validate.go`. See `gohighlevel.go` for the connector pattern and `voice_actions.go` / `dograh_admin.go` for the build-tag-gated examples.
 
 ## State & idempotency
 
@@ -170,9 +188,37 @@ budgets:
   per_step_tokens:     2048
   per_pipeline_tokens: 10000
   per_day_tokens:      100000
+  per_day_calls:       200      # voice plugin
+  per_day_call_minutes: 1500    # voice plugin
 
 state:
   path: ./state.db
+```
+
+When built with `-tags voice`, an additional `voice:` block configures the webhook receivers, the Dograh REST endpoints used by the admin actions, and the pre-call context lookup:
+
+```yaml
+voice:
+  enabled: true
+  listen_addr: 127.0.0.1:8080
+  public_base_url: https://draftyard.client.eu          # Dograh hits this
+  auth:
+    method: bearer
+    token_env: DRAFTYARD_VOICE_TOKEN
+  dograh:
+    base_url: https://dograh.client.internal            # prod
+    staging_url: https://dograh-staging.client.internal # for dograh_staging_smoke
+    api_key_env: DOGRAH_API_KEY
+  pre_call:
+    enabled: true
+    timeout_ms: 300
+    lookups:
+      - {source: ghl}                                   # auto-uses your existing GHL connector
+      - {source: custom_http, url: https://crm.client.internal/lookup, header: "Authorization=Bearer {{env.CRM_TOKEN}}"}
+    routing_rules:
+      - {if: "support_tier == 'enterprise'", workflow: dach-enterprise}
+      - {if: "lang == 'de-CH'",              workflow: schweizerdeutsch-screener}
+      - {default: standard-de}
 ```
 
 Skills are YAML prompt templates in `skills/`:
@@ -227,7 +273,7 @@ The deterministic-boundary architecture is documented in the **Production AI Aut
 
 **v0.1** — early access. Single-business, single-operator deployments. Public APIs may change between minor versions until v1.0.
 
-Roadmap signals: webhook triggers, generic HTTP actions, per-step retry & circuit breaker, Slack approval channel, structured JSON logging + Prometheus metrics, Google Sheets connector.
+Roadmap signals: webhook triggers, generic HTTP actions, per-step retry & circuit breaker, Slack approval channel, structured JSON logging + Prometheus metrics, Google Sheets connector. Voice plugin v0.2: outbound campaigns (consent-gated), recording redaction, MCP bridge for Dograh-driven workflows.
 
 ## Star History
 
