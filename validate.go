@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/renezander030/draftcat/internal/config"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -110,7 +111,7 @@ func runValidate(args []string) int {
 		rep.errf("config", "failed to read %s: %v", configPath, err)
 		return printValidateReport(rep, jsonOut, strict)
 	}
-	var cfg Config
+	var cfg config.Config
 	if err := yaml.Unmarshal(cfgData, &cfg); err != nil {
 		rep.errf("config", "failed to parse %s: %v", configPath, err)
 		return printValidateReport(rep, jsonOut, strict)
@@ -177,7 +178,7 @@ func loadSkillsForValidate(skillsDir string, rep *validateReport) map[string]*Sk
 	return skills
 }
 
-func checkConfigSecurity(cfg *Config, rep *validateReport) {
+func checkConfigSecurity(cfg *config.Config, rep *validateReport) {
 	if cfg.Telegram.Security.MaxInputLength <= 0 {
 		rep.errf("telegram.security.max_input_length", "must be set and > 0 (engine refuses to start without it)")
 	}
@@ -189,7 +190,7 @@ func checkConfigSecurity(cfg *Config, rep *validateReport) {
 	}
 }
 
-func checkTimeouts(cfg *Config, rep *validateReport) {
+func checkTimeouts(cfg *config.Config, rep *validateReport) {
 	for label, val := range map[string]string{
 		"timeouts.ai_call":           cfg.Timeouts.AICall,
 		"timeouts.operator_approval": cfg.Timeouts.OperatorApproval,
@@ -204,7 +205,7 @@ func checkTimeouts(cfg *Config, rep *validateReport) {
 	}
 }
 
-func checkRolesToModels(cfg *Config, rep *validateReport) {
+func checkRolesToModels(cfg *config.Config, rep *validateReport) {
 	for role, model := range cfg.Roles {
 		if _, ok := cfg.Models[model]; !ok {
 			rep.errf("roles."+role, "model %q is not declared in models:", model)
@@ -212,7 +213,7 @@ func checkRolesToModels(cfg *Config, rep *validateReport) {
 	}
 }
 
-func checkEnvVars(cfg *Config, rep *validateReport) {
+func checkEnvVars(cfg *config.Config, rep *validateReport) {
 	if cfg.Provider.APIKeyEnv != "" && os.Getenv(cfg.Provider.APIKeyEnv) == "" {
 		rep.warnf("provider.api_key_env", "env var %s is empty (engine will refuse to start at runtime)", cfg.Provider.APIKeyEnv)
 	}
@@ -224,7 +225,7 @@ func checkEnvVars(cfg *Config, rep *validateReport) {
 	}
 }
 
-func checkPipelines(cfg *Config, skills map[string]*SkillDef, skillsDir string, rep *validateReport) {
+func checkPipelines(cfg *config.Config, skills map[string]*SkillDef, skillsDir string, rep *validateReport) {
 	seen := map[string]bool{}
 	for pi, p := range cfg.Pipelines {
 		path := fmt.Sprintf("pipelines[%d:%s]", pi, p.Name)
@@ -319,7 +320,7 @@ func checkPipelines(cfg *Config, skills map[string]*SkillDef, skillsDir string, 
 	}
 }
 
-func checkOrphanedSkills(cfg *Config, skills map[string]*SkillDef, rep *validateReport) {
+func checkOrphanedSkills(cfg *config.Config, skills map[string]*SkillDef, rep *validateReport) {
 	referenced := map[string]bool{}
 	for _, p := range cfg.Pipelines {
 		for _, st := range p.Steps {

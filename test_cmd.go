@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/renezander030/draftcat/internal/config"
 	"os"
 	"path/filepath"
 	"strings"
@@ -125,7 +126,7 @@ func runTestCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "test: read config: %v\n", err)
 		return 1
 	}
-	var cfg Config
+	var cfg config.Config
 	if err := yaml.Unmarshal(cfgData, &cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "test: parse config: %v\n", err)
 		return 1
@@ -133,7 +134,7 @@ func runTestCmd(args []string) int {
 
 	skills, _ := loadSkills(skillsDir)
 
-	var pipeline *PipelineConfig
+	var pipeline *config.PipelineConfig
 	for i := range cfg.Pipelines {
 		if cfg.Pipelines[i].Name == pipelineName {
 			pipeline = &cfg.Pipelines[i]
@@ -158,7 +159,7 @@ func runTestCmd(args []string) int {
 }
 
 // runTestPipeline walks pipeline steps using fixtures instead of real connectors / AI / approval.
-func runTestPipeline(cfg *Config, p PipelineConfig, skills *SkillRegistry, ch *stubChannel, fixDir string) int {
+func runTestPipeline(cfg *config.Config, p config.PipelineConfig, skills *SkillRegistry, ch *stubChannel, fixDir string) int {
 	data := map[string]interface{}{}
 
 	// Optional seed fixture: fixtures/<pipeline>/_input.json merged into the data map before any step.

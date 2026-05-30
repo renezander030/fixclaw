@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/renezander030/draftcat/internal/config"
 	"io"
 	"log"
 	"net/http"
@@ -26,92 +27,6 @@ import (
 	statestore "github.com/renezander030/draftcat/internal/state"
 	"github.com/renezander030/draftcat/internal/voicebridge"
 )
-
-// --- Config ---
-
-type Config struct {
-	Telegram  TelegramConfig         `yaml:"telegram"`
-	Gmail     gmailapi.GmailConfig   `yaml:"gmail"`
-	GHL       ghlapi.GHLConfig       `yaml:"gohighlevel"`
-	State     StateConfig            `yaml:"state"`
-	Provider  ProviderConfig         `yaml:"provider"`
-	Models    map[string]ModelConfig `yaml:"models"`
-	Roles     map[string]string      `yaml:"roles"`
-	Budgets   BudgetConfig           `yaml:"budgets"`
-	Timeouts  TimeoutConfig          `yaml:"timeouts"`
-	Pipelines []PipelineConfig       `yaml:"pipelines"`
-	// Voice is parsed unconditionally as raw YAML. Decoded into voice.Config
-	// only when draftcat is built with -tags voice. Lean builds ignore it.
-	Voice yaml.Node `yaml:"voice"`
-}
-
-// StateConfig points at the SQLite file used for cross-run state (dedup +
-// run history). Empty Path defaults to "./state.db".
-type StateConfig struct {
-	Path string `yaml:"path"`
-}
-
-type TelegramConfig struct {
-	TokenEnv string          `yaml:"token_env"`
-	ChatID   int64           `yaml:"chat_id"`
-	Security ChannelSecurity `yaml:"security"`
-	token    string
-}
-
-// ChannelSecurity is REQUIRED per operator channel. Engine refuses to start without it.
-type ChannelSecurity struct {
-	AllowedUsers   []int64 `yaml:"allowed_users"`    // TG user IDs / Slack user IDs that may interact
-	MaxInputLength int     `yaml:"max_input_length"` // max chars per operator message (default 500)
-	RateLimit      int     `yaml:"rate_limit"`       // max messages per minute per user (default 10)
-	StripMarkdown  bool    `yaml:"strip_markdown"`   // strip formatting that could break prompt boundaries
-}
-
-type ProviderConfig struct {
-	Type      string `yaml:"type"`
-	APIKeyEnv string `yaml:"api_key_env"`
-	BaseURL   string `yaml:"base_url"`
-	apiKey    string
-}
-
-type ModelConfig struct {
-	Model     string  `yaml:"model"`
-	MaxTokens int     `yaml:"max_tokens"`
-	CostIn    float64 `yaml:"cost_per_1k_input"`
-	CostOut   float64 `yaml:"cost_per_1k_output"`
-}
-
-type BudgetConfig struct {
-	PerStepTokens     int `yaml:"per_step_tokens"`
-	PerPipelineTokens int `yaml:"per_pipeline_tokens"`
-	PerDayTokens      int `yaml:"per_day_tokens"`
-	PerDayCalls       int `yaml:"per_day_calls"`
-	PerDayCallMinutes int `yaml:"per_day_call_minutes"`
-}
-
-type TimeoutConfig struct {
-	AICall           string `yaml:"ai_call"`
-	OperatorApproval string `yaml:"operator_approval"`
-	PipelineTotal    string `yaml:"pipeline_total"`
-}
-
-type PipelineConfig struct {
-	Name     string       `yaml:"name"`
-	Schedule string       `yaml:"schedule"`
-	Steps    []StepConfig `yaml:"steps"`
-}
-
-type StepConfig struct {
-	Name         string                 `yaml:"name"`
-	Type         string                 `yaml:"type"`   // deterministic, ai, approval
-	Action       string                 `yaml:"action"` // deterministic action name
-	Role         string                 `yaml:"role"`
-	Skill        string                 `yaml:"skill"` // reference to skills/<name>.yaml
-	Prompt       string                 `yaml:"prompt"`
-	Vars         map[string]string      `yaml:"vars"` // variables injected into skill prompt
-	Mode         string                 `yaml:"mode"`
-	Channel      string                 `yaml:"channel"`
-	OutputSchema map[string]interface{} `yaml:"output_schema"`
-}
 
 // --- Skills ---
 
@@ -180,7 +95,7 @@ type Scheduler struct {
 	pipelines map[string]*PipelineState
 }
 
-func newScheduler(pipelines []PipelineConfig) *Scheduler {
+func newScheduler(pipelines []config.PipelineConfig) *Scheduler {
 	s := &Scheduler{pipelines: make(map[string]*PipelineState)}
 	for _, p := range pipelines {
 		ps := &PipelineState{
@@ -376,7 +291,7 @@ type InputValidationResult struct {
 	Reason string
 }
 
-func validateOperatorInput(text string, sec ChannelSecurity) InputValidationResult {
+func validateOperatorInput(text string, sec config.ChannelSecurity) InputValidationResult {
 	// 1. Length check
 	maxLen := sec.MaxInputLength
 	if maxLen == 0 {
@@ -437,7 +352,7 @@ func stripRoleMarkers(text string) string {
 
 // validateChannelSecurity checks that security config is present and valid.
 // Called at startup — engine refuses to start if this fails.
-func validateChannelSecurity(cfg *Config) error {
+func validateChannelSecurity(cfg *config.Config) error {
 	// Telegram channel must have security configured
 	if cfg.Telegram.ChatID != 0 {
 		sec := cfg.Telegram.Security
@@ -518,7 +433,7 @@ var httpClient = &http.Client{
 	Timeout: 30 * time.Second,
 }
 
-func callLLM(ctx context.Context, cfg *Config, role string, prompt string) (*CompletionResponse, error) {
+func callLLM(ctx context.Context, cfg *config.Config, role string, prompt string) (*CompletionResponse, error) {
 	modelName, ok := cfg.Roles[role]
 	if !ok {
 		return nil, fmt.Errorf("unknown role: %s", role)
@@ -552,7 +467,7 @@ func callLLM(ctx context.Context, cfg *Config, role string, prompt string) (*Com
 			return nil, err
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+cfg.Provider.apiKey)
+		req.Header.Set("Authorization", "Bearer "+cfg.Provider.APIKey())
 
 		start := time.Now()
 		resp, err := httpClient.Do(req)
@@ -708,7 +623,7 @@ type TGBot struct {
 	token       string
 	chatID      int64
 	offset      int
-	security    ChannelSecurity
+	security    config.ChannelSecurity
 	rateLimiter *RateLimiter
 }
 
@@ -966,7 +881,7 @@ func (t *TGBot) getUpdates() ([]TGUpdate, error) {
 
 // --- Pipeline Engine ---
 
-func runPipeline(cfg *Config, pipeline PipelineConfig, budget *BudgetTracker, ch OperatorChannel, skills *SkillRegistry) error {
+func runPipeline(cfg *config.Config, pipeline config.PipelineConfig, budget *BudgetTracker, ch OperatorChannel, skills *SkillRegistry) error {
 	log.Printf("[pipeline:%s] starting", pipeline.Name)
 	budget.tokensUsedPipeline = 0
 
@@ -1417,7 +1332,7 @@ func (h *ChatHistory) Len() int {
 	return len(h.messages)
 }
 
-func handleCommand(cmd string, args string, bot *TGBot, sched *Scheduler, skills *SkillRegistry, cfg *Config, budget *BudgetTracker) {
+func handleCommand(cmd string, args string, bot *TGBot, sched *Scheduler, skills *SkillRegistry, cfg *config.Config, budget *BudgetTracker) {
 	switch cmd {
 	case "/cron":
 		handleCron(args, bot, sched)
@@ -1442,7 +1357,7 @@ func handleCommand(cmd string, args string, bot *TGBot, sched *Scheduler, skills
 	}
 }
 
-func handleEmails(args string, bot *TGBot, cfg *Config, budget *BudgetTracker) {
+func handleEmails(args string, bot *TGBot, cfg *config.Config, budget *BudgetTracker) {
 	if gmail == nil {
 		bot.Send("[emails] Gmail connector not configured.")
 		return
@@ -1532,7 +1447,7 @@ func handleEmails(args string, bot *TGBot, cfg *Config, budget *BudgetTracker) {
 	}
 }
 
-func handleReply(args string, bot *TGBot, cfg *Config, budget *BudgetTracker) {
+func handleReply(args string, bot *TGBot, cfg *config.Config, budget *BudgetTracker) {
 	if gmail == nil {
 		bot.Send("[reply] Gmail connector not configured.")
 		return
@@ -1678,7 +1593,7 @@ Body:
 
 const authRedirectPort = 9999
 
-func handleThread(args string, bot *TGBot, cfg *Config, budget *BudgetTracker) {
+func handleThread(args string, bot *TGBot, cfg *config.Config, budget *BudgetTracker) {
 	if gmail == nil {
 		bot.Send("[thread] Gmail connector not configured.")
 		return
@@ -1888,14 +1803,14 @@ func handleSkills(bot *TGBot, skills *SkillRegistry) {
 	bot.Send(msg)
 }
 
-func handleRun(args string, bot *TGBot, sched *Scheduler, cfg *Config, budget *BudgetTracker, skills *SkillRegistry) {
+func handleRun(args string, bot *TGBot, sched *Scheduler, cfg *config.Config, budget *BudgetTracker, skills *SkillRegistry) {
 	name := strings.TrimSpace(args)
 	if name == "" {
 		bot.Send("[run] Usage: /run <pipeline-name>")
 		return
 	}
 	// Find pipeline config
-	var pipeline *PipelineConfig
+	var pipeline *config.PipelineConfig
 	for i := range cfg.Pipelines {
 		if cfg.Pipelines[i].Name == name {
 			pipeline = &cfg.Pipelines[i]
@@ -1965,19 +1880,19 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to read config: %v", err)
 	}
-	var cfg Config
+	var cfg config.Config
 	if err := yaml.Unmarshal(cfgData, &cfg); err != nil {
 		log.Fatalf("failed to parse config: %v", err)
 	}
 
 	// Resolve env vars
-	cfg.Telegram.token = resolveEnv(cfg.Telegram.TokenEnv, "DRAFTCAT_TG_TOKEN")
-	cfg.Provider.apiKey = resolveEnv(cfg.Provider.APIKeyEnv, "OPENROUTER_API_KEY")
+	cfg.Telegram.SetToken(resolveEnv(cfg.Telegram.TokenEnv, "DRAFTCAT_TG_TOKEN"))
+	cfg.Provider.SetAPIKey(resolveEnv(cfg.Provider.APIKeyEnv, "OPENROUTER_API_KEY"))
 
-	if cfg.Telegram.token == "" {
+	if cfg.Telegram.Token() == "" {
 		log.Fatal("Telegram token not set. Set DRAFTCAT_TG_TOKEN env var.")
 	}
-	if cfg.Provider.apiKey == "" {
+	if cfg.Provider.APIKey() == "" {
 		log.Fatal("OpenRouter API key not set. Set OPENROUTER_API_KEY env var.")
 	}
 
@@ -2040,7 +1955,7 @@ func main() {
 		len(cfg.Pipelines), len(skillReg.skills), cfg.Provider.Type, cfg.Telegram.ChatID)
 
 	bot := &TGBot{
-		token:       cfg.Telegram.token,
+		token:       cfg.Telegram.Token(),
 		chatID:      cfg.Telegram.ChatID,
 		security:    cfg.Telegram.Security,
 		rateLimiter: newRateLimiter(cfg.Telegram.Security.RateLimit),
@@ -2289,7 +2204,7 @@ Conversation so far:
 					if cfg.Pipelines[i].Name == name {
 						log.Printf("[scheduler] running due pipeline: %s", name)
 						sched.SetRunning(name, true)
-						go func(p PipelineConfig) {
+						go func(p config.PipelineConfig) {
 							defer sched.SetRunning(p.Name, false)
 							if err := runPipeline(&cfg, p, budget, bot, skillReg); err != nil {
 								log.Printf("[scheduler] pipeline %s error: %v", p.Name, err)
