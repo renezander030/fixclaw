@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/renezander030/draftcat/internal/config"
+	skillsapi "github.com/renezander030/draftcat/internal/skills"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -129,8 +130,8 @@ func runValidate(args []string) int {
 	return printValidateReport(rep, jsonOut, strict)
 }
 
-func loadSkillsForValidate(skillsDir string, rep *validateReport) map[string]*SkillDef {
-	skills := map[string]*SkillDef{}
+func loadSkillsForValidate(skillsDir string, rep *validateReport) map[string]*skillsapi.SkillDef {
+	skills := map[string]*skillsapi.SkillDef{}
 	skillFiles, _ := filepath.Glob(filepath.Join(skillsDir, "*.yaml"))
 	if len(skillFiles) == 0 {
 		rep.warnf("skills/", "no *.yaml files found in %s", skillsDir)
@@ -143,7 +144,7 @@ func loadSkillsForValidate(skillsDir string, rep *validateReport) map[string]*Sk
 			rep.errf("skills/"+base, "read failed: %v", err)
 			continue
 		}
-		var s SkillDef
+		var s skillsapi.SkillDef
 		if err := yaml.Unmarshal(data, &s); err != nil {
 			rep.errf("skills/"+base, "parse failed: %v", err)
 			continue
@@ -225,7 +226,7 @@ func checkEnvVars(cfg *config.Config, rep *validateReport) {
 	}
 }
 
-func checkPipelines(cfg *config.Config, skills map[string]*SkillDef, skillsDir string, rep *validateReport) {
+func checkPipelines(cfg *config.Config, skills map[string]*skillsapi.SkillDef, skillsDir string, rep *validateReport) {
 	seen := map[string]bool{}
 	for pi, p := range cfg.Pipelines {
 		path := fmt.Sprintf("pipelines[%d:%s]", pi, p.Name)
@@ -320,7 +321,7 @@ func checkPipelines(cfg *config.Config, skills map[string]*SkillDef, skillsDir s
 	}
 }
 
-func checkOrphanedSkills(cfg *config.Config, skills map[string]*SkillDef, rep *validateReport) {
+func checkOrphanedSkills(cfg *config.Config, skills map[string]*skillsapi.SkillDef, rep *validateReport) {
 	referenced := map[string]bool{}
 	for _, p := range cfg.Pipelines {
 		for _, st := range p.Steps {

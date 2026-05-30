@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/renezander030/draftcat/internal/config"
+	skillsapi "github.com/renezander030/draftcat/internal/skills"
 	"os"
 	"path/filepath"
 	"strings"
@@ -132,7 +133,7 @@ func runTestCmd(args []string) int {
 		return 1
 	}
 
-	skills, _ := loadSkills(skillsDir)
+	skills, _ := skillsapi.LoadSkills(skillsDir)
 
 	var pipeline *config.PipelineConfig
 	for i := range cfg.Pipelines {
@@ -159,7 +160,7 @@ func runTestCmd(args []string) int {
 }
 
 // runTestPipeline walks pipeline steps using fixtures instead of real connectors / AI / approval.
-func runTestPipeline(cfg *config.Config, p config.PipelineConfig, skills *SkillRegistry, ch *stubChannel, fixDir string) int {
+func runTestPipeline(cfg *config.Config, p config.PipelineConfig, skills *skillsapi.SkillRegistry, ch *stubChannel, fixDir string) int {
 	data := map[string]interface{}{}
 
 	// Optional seed fixture: fixtures/<pipeline>/_input.json merged into the data map before any step.

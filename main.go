@@ -6,12 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/renezander030/draftcat/internal/config"
+	skillsapi "github.com/renezander030/draftcat/internal/skills"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -27,57 +27,6 @@ import (
 	statestore "github.com/renezander030/draftcat/internal/state"
 	"github.com/renezander030/draftcat/internal/voicebridge"
 )
-
-// --- Skills ---
-
-type SkillDef struct {
-	Name         string                 `yaml:"name"`
-	Description  string                 `yaml:"description"`
-	Role         string                 `yaml:"role"`
-	Prompt       string                 `yaml:"prompt"`
-	OutputSchema map[string]interface{} `yaml:"output_schema"`
-}
-
-// SkillRegistry loads and holds all skills from the skills/ directory
-type SkillRegistry struct {
-	skills map[string]*SkillDef
-}
-
-func loadSkills(dir string) (*SkillRegistry, error) {
-	reg := &SkillRegistry{skills: make(map[string]*SkillDef)}
-	files, err := filepath.Glob(filepath.Join(dir, "*.yaml"))
-	if err != nil {
-		return reg, nil // no skills dir is fine
-	}
-	for _, f := range files {
-		data, err := os.ReadFile(f)
-		if err != nil {
-			log.Printf("[skills] failed to read %s: %v", f, err)
-			continue
-		}
-		var skill SkillDef
-		if err := yaml.Unmarshal(data, &skill); err != nil {
-			log.Printf("[skills] failed to parse %s: %v", f, err)
-			continue
-		}
-		reg.skills[skill.Name] = &skill
-		log.Printf("[skills] loaded: %s (%s)", skill.Name, skill.Description)
-	}
-	return reg, nil
-}
-
-func (r *SkillRegistry) Get(name string) (*SkillDef, bool) {
-	s, ok := r.skills[name]
-	return s, ok
-}
-
-func (r *SkillRegistry) List() []*SkillDef {
-	var out []*SkillDef
-	for _, s := range r.skills {
-		out = append(out, s)
-	}
-	return out
-}
 
 // --- Scheduler ---
 
@@ -881,7 +830,7 @@ func (t *TGBot) getUpdates() ([]TGUpdate, error) {
 
 // --- Pipeline Engine ---
 
-func runPipeline(cfg *config.Config, pipeline config.PipelineConfig, budget *BudgetTracker, ch OperatorChannel, skills *SkillRegistry) error {
+func runPipeline(cfg *config.Config, pipeline config.PipelineConfig, budget *BudgetTracker, ch OperatorChannel, skills *skillsapi.SkillRegistry) error {
 	log.Printf("[pipeline:%s] starting", pipeline.Name)
 	budget.tokensUsedPipeline = 0
 
@@ -1332,7 +1281,7 @@ func (h *ChatHistory) Len() int {
 	return len(h.messages)
 }
 
-func handleCommand(cmd string, args string, bot *TGBot, sched *Scheduler, skills *SkillRegistry, cfg *config.Config, budget *BudgetTracker) {
+func handleCommand(cmd string, args string, bot *TGBot, sched *Scheduler, skills *skillsapi.SkillRegistry, cfg *config.Config, budget *BudgetTracker) {
 	switch cmd {
 	case "/cron":
 		handleCron(args, bot, sched)
@@ -1790,7 +1739,7 @@ func handleCron(args string, bot *TGBot, sched *Scheduler) {
 	bot.Send("[cron] Usage: /cron | /cron pause <name> | /cron resume <name> | /cron set <name> <interval>")
 }
 
-func handleSkills(bot *TGBot, skills *SkillRegistry) {
+func handleSkills(bot *TGBot, skills *skillsapi.SkillRegistry) {
 	list := skills.List()
 	if len(list) == 0 {
 		bot.Send("[skills] No skills loaded.")
@@ -1803,7 +1752,7 @@ func handleSkills(bot *TGBot, skills *SkillRegistry) {
 	bot.Send(msg)
 }
 
-func handleRun(args string, bot *TGBot, sched *Scheduler, cfg *config.Config, budget *BudgetTracker, skills *SkillRegistry) {
+func handleRun(args string, bot *TGBot, sched *Scheduler, cfg *config.Config, budget *BudgetTracker, skills *skillsapi.SkillRegistry) {
 	name := strings.TrimSpace(args)
 	if name == "" {
 		bot.Send("[run] Usage: /run <pipeline-name>")
@@ -1906,7 +1855,7 @@ func main() {
 	if len(os.Args) > 2 {
 		skillsDir = os.Args[2]
 	}
-	skillReg, _ := loadSkills(skillsDir)
+	skillReg, _ := skillsapi.LoadSkills(skillsDir)
 
 	// Init Gmail connector if configured
 	if cfg.Gmail.TokenPath != "" {
@@ -1952,7 +1901,7 @@ func main() {
 	sched := newScheduler(cfg.Pipelines)
 
 	log.Printf("draftcat starting — %d pipeline(s), %d skill(s), provider=%s, operator=telegram:%d",
-		len(cfg.Pipelines), len(skillReg.skills), cfg.Provider.Type, cfg.Telegram.ChatID)
+		len(cfg.Pipelines), len(skillReg.List()), cfg.Provider.Type, cfg.Telegram.ChatID)
 
 	bot := &TGBot{
 		token:       cfg.Telegram.Token(),

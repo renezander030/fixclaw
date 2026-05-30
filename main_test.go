@@ -2,6 +2,7 @@ package main
 
 import (
 	"github.com/renezander030/draftcat/internal/config"
+	skillsapi "github.com/renezander030/draftcat/internal/skills"
 	"os"
 	"path/filepath"
 	"testing"
@@ -438,9 +439,9 @@ output_schema:
 		t.Fatal(err)
 	}
 
-	reg, err := loadSkills(dir)
+	reg, err := skillsapi.LoadSkills(dir)
 	if err != nil {
-		t.Fatalf("loadSkills failed: %v", err)
+		t.Fatalf("skillsapi.LoadSkills failed: %v", err)
 	}
 
 	skill, ok := reg.Get("test-skill")
@@ -463,9 +464,9 @@ output_schema:
 
 func TestLoadSkillsEmptyDir(t *testing.T) {
 	dir := t.TempDir()
-	reg, err := loadSkills(dir)
+	reg, err := skillsapi.LoadSkills(dir)
 	if err != nil {
-		t.Fatalf("loadSkills failed: %v", err)
+		t.Fatalf("skillsapi.LoadSkills failed: %v", err)
 	}
 	if len(reg.List()) != 0 {
 		t.Errorf("expected 0 skills, got %d", len(reg.List()))
@@ -473,9 +474,9 @@ func TestLoadSkillsEmptyDir(t *testing.T) {
 }
 
 func TestLoadSkillsNonexistentDir(t *testing.T) {
-	reg, err := loadSkills("/nonexistent/path/to/skills")
+	reg, err := skillsapi.LoadSkills("/nonexistent/path/to/skills")
 	if err != nil {
-		t.Fatalf("loadSkills should not error on missing dir: %v", err)
+		t.Fatalf("skillsapi.LoadSkills should not error on missing dir: %v", err)
 	}
 	if len(reg.List()) != 0 {
 		t.Errorf("expected 0 skills, got %d", len(reg.List()))
@@ -490,7 +491,7 @@ func TestLoadSkillsMultiple(t *testing.T) {
 		os.WriteFile(filepath.Join(dir, name+".yaml"), []byte(data), 0644)
 	}
 
-	reg, _ := loadSkills(dir)
+	reg, _ := skillsapi.LoadSkills(dir)
 	if len(reg.List()) != 2 {
 		t.Errorf("expected 2 skills, got %d", len(reg.List()))
 	}
