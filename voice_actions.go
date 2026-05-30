@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/renezander030/draftcat/internal/dograh"
 	"github.com/renezander030/draftcat/voice"
 )
 
@@ -18,7 +19,7 @@ func tryVoiceAction(action, pipelineName string, vars map[string]string, data ma
 	// runs even before any session has been recorded.
 	switch action {
 	case "git_commit_workflow_update":
-		sha, err := gitCommitWorkflow(vars, data)
+		sha, err := dograh.GitCommitWorkflow(vars, data)
 		if err != nil {
 			return true, false, err
 		}
@@ -26,7 +27,7 @@ func tryVoiceAction(action, pipelineName string, vars map[string]string, data ma
 		return true, false, nil
 
 	case "dograh_staging_smoke":
-		runID, err := dograhTriggerRun(setEnv(vars, "staging"), data)
+		runID, err := dograh.DograhTriggerRun(dograhConfig(), setEnv(vars, "staging"), data)
 		if err != nil {
 			return true, false, err
 		}
@@ -34,7 +35,7 @@ func tryVoiceAction(action, pipelineName string, vars map[string]string, data ma
 		return true, false, nil
 
 	case "dograh_prod_publish":
-		if err := dograhUpdateWorkflow(vars, data); err != nil {
+		if err := dograh.DograhUpdateWorkflow(dograhConfig(), vars, data); err != nil {
 			return true, false, err
 		}
 		data["voice_admin_publish_status"] = "ok"
@@ -210,4 +211,14 @@ func varInt(vars map[string]string, key string, def int) int {
 		}
 	}
 	return def
+}
+
+// dograhConfig maps the voice plugin's Dograh settings onto the dograh
+// connector's own Config, keeping internal/dograh free of any voice types.
+func dograhConfig() dograh.Config {
+	return dograh.Config{
+		BaseURL:    voiceCfg.Dograh.BaseURL,
+		StagingURL: voiceCfg.Dograh.StagingURL,
+		APIKeyEnv:  voiceCfg.Dograh.APIKeyEnv,
+	}
 }

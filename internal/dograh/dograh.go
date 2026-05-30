@@ -1,6 +1,4 @@
-//go:build voice
-
-package main
+package dograh
 
 import (
 	"bytes"
@@ -15,7 +13,7 @@ import (
 	"time"
 )
 
-// gitCommitWorkflow stages and commits a workflow definition file. Used by the
+// GitCommitWorkflow stages and commits a workflow definition file. Used by the
 // 7-step guardrail flow between AI-proposed changes and the staging smoke run.
 //
 // vars:
@@ -27,7 +25,7 @@ import (
 //	message_var     (optional) data key for the commit message
 //	message         (optional) literal commit message (fallback)
 //	repo_dir        (optional) repository directory; defaults to cwd
-func gitCommitWorkflow(vars map[string]string, data map[string]interface{}) (string, error) {
+func GitCommitWorkflow(vars map[string]string, data map[string]interface{}) (string, error) {
 	path := vars["path"]
 	if path == "" {
 		return "", fmt.Errorf("git_commit_workflow_update requires vars.path")
@@ -93,7 +91,7 @@ func marshalForFile(v any) ([]byte, error) {
 	}
 }
 
-// dograhTriggerRun fires an outbound agent run on the staging or prod Dograh
+// DograhTriggerRun fires an outbound agent run on the staging or prod Dograh
 // instance via POST /api/v1/public/agent/workflow/{workflow_uuid}.
 //
 // vars:
@@ -103,14 +101,14 @@ func marshalForFile(v any) ([]byte, error) {
 //	initial_context_var (optional) data key holding initial_context map; sent
 //	                    in the request body when present
 //	env                 (optional) "staging" or "prod"; defaults to "staging"
-func dograhTriggerRun(vars map[string]string, data map[string]interface{}) (string, error) {
+func DograhTriggerRun(cfg Config, vars map[string]string, data map[string]interface{}) (string, error) {
 	target := vars["env"]
 	if target == "" {
 		target = "staging"
 	}
-	baseURL := voiceCfg.Dograh.StagingURL
+	baseURL := cfg.StagingURL
 	if target == "prod" {
-		baseURL = voiceCfg.Dograh.BaseURL
+		baseURL = cfg.BaseURL
 	}
 	if baseURL == "" {
 		return "", fmt.Errorf("dograh trigger: voice.dograh.%s_url not configured", strings.TrimSuffix(target, "_url"))
@@ -133,7 +131,7 @@ func dograhTriggerRun(vars map[string]string, data map[string]interface{}) (stri
 	}
 
 	url := fmt.Sprintf("%s/api/v1/public/agent/workflow/%s", strings.TrimRight(baseURL, "/"), workflowUUID)
-	respBody, err := dograhRequest(http.MethodPost, url, body)
+	respBody, err := dograhRequest(cfg, http.MethodPost, url, body)
 	if err != nil {
 		return "", err
 	}
@@ -148,7 +146,7 @@ func dograhTriggerRun(vars map[string]string, data map[string]interface{}) (stri
 	return fmt.Sprint(resp.WorkflowRunID), nil
 }
 
-// dograhUpdateWorkflow PUTs an updated workflow_definition to prod via
+// DograhUpdateWorkflow PUTs an updated workflow_definition to prod via
 // PUT /api/v1/workflow/{workflow_id}. Dograh auto-versions the definition,
 // preserving the previous version's history.
 //
@@ -159,8 +157,8 @@ func dograhTriggerRun(vars map[string]string, data map[string]interface{}) (stri
 //	definition_path  (required) path to the workflow_definition JSON file
 //	                 on disk (typically the same file git_commit_workflow_update
 //	                 committed earlier in the pipeline)
-func dograhUpdateWorkflow(vars map[string]string, data map[string]interface{}) error {
-	if voiceCfg.Dograh.BaseURL == "" {
+func DograhUpdateWorkflow(cfg Config, vars map[string]string, data map[string]interface{}) error {
+	if cfg.BaseURL == "" {
 		return fmt.Errorf("dograh publish: voice.dograh.base_url not configured")
 	}
 
@@ -188,15 +186,15 @@ func dograhUpdateWorkflow(vars map[string]string, data map[string]interface{}) e
 		return fmt.Errorf("dograh publish: %s is not valid JSON: %w", defPath, err)
 	}
 
-	url := fmt.Sprintf("%s/api/v1/workflow/%s", strings.TrimRight(voiceCfg.Dograh.BaseURL, "/"), workflowID)
+	url := fmt.Sprintf("%s/api/v1/workflow/%s", strings.TrimRight(cfg.BaseURL, "/"), workflowID)
 	body := map[string]any{"workflow_definition": defObj}
-	if _, err := dograhRequest(http.MethodPut, url, body); err != nil {
+	if _, err := dograhRequest(cfg, http.MethodPut, url, body); err != nil {
 		return err
 	}
 	return nil
 }
 
-func dograhRequest(method, url string, body any) ([]byte, error) {
+func dograhRequest(cfg Config, method, url string, body any) ([]byte, error) {
 	var reader io.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
@@ -213,7 +211,7 @@ func dograhRequest(method, url string, body any) ([]byte, error) {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if env := voiceCfg.Dograh.APIKeyEnv; env != "" {
+	if env := cfg.APIKeyEnv; env != "" {
 		if token := os.Getenv(env); token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
@@ -234,4 +232,13 @@ func dograhRequest(method, url string, body any) ([]byte, error) {
 		return nil, fmt.Errorf("dograh %s %s: HTTP %d: %s", method, url, resp.StatusCode, snippet)
 	}
 	return respBody, nil
+}
+
+// Config holds the Dograh REST endpoints + auth env var. The caller builds it
+// (e.g. from the voice plugin config) and passes it to the trigger/publish
+// actions, keeping this package independent of any orchestrator config type.
+type Config struct {
+	BaseURL    string // prod
+	StagingURL string // staging
+	APIKeyEnv  string // env var holding the bearer token
 }

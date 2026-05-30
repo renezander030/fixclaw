@@ -1,6 +1,4 @@
-//go:build voice
-
-package main
+package dograh
 
 import (
 	"encoding/json"
@@ -12,8 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/renezander030/draftcat/voice"
 )
 
 func newTempGitRepo(t *testing.T) string {
@@ -49,7 +45,7 @@ func TestGitCommitWorkflowWritesAndCommits(t *testing.T) {
 		"message_var": "commit_message",
 		"repo_dir":    dir,
 	}
-	sha, err := gitCommitWorkflow(vars, data)
+	sha, err := GitCommitWorkflow(vars, data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +68,7 @@ func TestGitCommitWorkflowWritesAndCommits(t *testing.T) {
 }
 
 func TestGitCommitWorkflowRequiresPath(t *testing.T) {
-	if _, err := gitCommitWorkflow(map[string]string{}, map[string]interface{}{}); err == nil {
+	if _, err := GitCommitWorkflow(map[string]string{}, map[string]interface{}{}); err == nil {
 		t.Fatal("want error when vars.path missing")
 	}
 }
@@ -91,13 +87,11 @@ func TestDograhTriggerRunPostsToCorrectURL(t *testing.T) {
 	t.Cleanup(mock.Close)
 
 	t.Setenv("TEST_DOGRAH_KEY", "dograh-secret")
-	prev := voiceCfg
-	t.Cleanup(func() { voiceCfg = prev })
-	voiceCfg = voice.Config{Dograh: voice.DograhConfig{
+	cfg := Config{
 		StagingURL: mock.URL,
 		BaseURL:    mock.URL,
 		APIKeyEnv:  "TEST_DOGRAH_KEY",
-	}}
+	}
 
 	data := map[string]interface{}{
 		"workflow_uuid": "wf-uuid-abc",
@@ -107,7 +101,8 @@ func TestDograhTriggerRunPostsToCorrectURL(t *testing.T) {
 		"workflow_uuid_var":   "workflow_uuid",
 		"initial_context_var": "caller_ctx",
 	}
-	runID, err := dograhTriggerRun(setEnv(vars, "staging"), data)
+	vars["env"] = "staging"
+	runID, err := DograhTriggerRun(cfg, vars, data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,10 +121,7 @@ func TestDograhTriggerRunPostsToCorrectURL(t *testing.T) {
 }
 
 func TestDograhTriggerRunMissingBaseURL(t *testing.T) {
-	prev := voiceCfg
-	t.Cleanup(func() { voiceCfg = prev })
-	voiceCfg = voice.Config{}
-	if _, err := dograhTriggerRun(setEnv(map[string]string{}, "staging"), map[string]interface{}{}); err == nil {
+	if _, err := DograhTriggerRun(Config{}, map[string]string{"env": "staging"}, map[string]interface{}{}); err == nil {
 		t.Fatal("want error when staging_url not configured")
 	}
 }
@@ -149,19 +141,17 @@ func TestDograhUpdateWorkflowPutsDefinition(t *testing.T) {
 	t.Cleanup(mock.Close)
 
 	t.Setenv("TEST_DOGRAH_KEY", "prod-secret")
-	prev := voiceCfg
-	t.Cleanup(func() { voiceCfg = prev })
-	voiceCfg = voice.Config{Dograh: voice.DograhConfig{
+	cfg := Config{
 		BaseURL:   mock.URL,
 		APIKeyEnv: "TEST_DOGRAH_KEY",
-	}}
+	}
 
 	def := filepath.Join(t.TempDir(), "dach.json")
 	_ = os.WriteFile(def, []byte(`{"nodes":[{"id":"n1"}],"edges":[]}`), 0o644)
 
 	data := map[string]interface{}{"workflow_id": 42}
 	vars := map[string]string{"definition_path": def}
-	if err := dograhUpdateWorkflow(vars, data); err != nil {
+	if err := DograhUpdateWorkflow(cfg, vars, data); err != nil {
 		t.Fatal(err)
 	}
 	if capturedMethod != "PUT" || capturedPath != "/api/v1/workflow/42" {
@@ -186,14 +176,12 @@ func TestDograhUpdateWorkflowSurfacesHTTPError(t *testing.T) {
 	}))
 	t.Cleanup(mock.Close)
 
-	prev := voiceCfg
-	t.Cleanup(func() { voiceCfg = prev })
-	voiceCfg = voice.Config{Dograh: voice.DograhConfig{BaseURL: mock.URL}}
+	cfg := Config{BaseURL: mock.URL}
 
 	def := filepath.Join(t.TempDir(), "x.json")
 	_ = os.WriteFile(def, []byte(`{}`), 0o644)
 
-	err := dograhUpdateWorkflow(map[string]string{"definition_path": def}, map[string]interface{}{"workflow_id": 99})
+	err := DograhUpdateWorkflow(cfg, map[string]string{"definition_path": def}, map[string]interface{}{"workflow_id": 99})
 	if err == nil || !strings.Contains(err.Error(), "404") {
 		t.Fatalf("want 404 error, got %v", err)
 	}
