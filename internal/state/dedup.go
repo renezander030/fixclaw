@@ -1,20 +1,21 @@
-package main
+package state
 
 import "log"
 
-// dedupByID is a generic helper for fetch actions: extract IDs, filter to
+// DedupByID is a generic helper for fetch actions: extract IDs, filter to
 // unseen, mark all fetched IDs as seen. Returns the filtered slice. Failures
 // in the state layer log a warning but never block the pipeline — dedup
-// degrades to "process everything" rather than silently dropping items.
-func dedupByID[T any](pipeline, scope string, items []T, keyFn func(T) string) []T {
-	if state == nil || len(items) == 0 {
+// degrades to "process everything" rather than silently dropping items. A nil
+// store disables dedup (returns items unchanged).
+func DedupByID[T any](s *StateStore, pipeline, scope string, items []T, keyFn func(T) string) []T {
+	if s == nil || len(items) == 0 {
 		return items
 	}
 	ids := make([]string, len(items))
 	for i, it := range items {
 		ids[i] = keyFn(it)
 	}
-	unseen, err := state.FilterUnseen(pipeline, scope, ids)
+	unseen, err := s.FilterUnseen(pipeline, scope, ids)
 	if err != nil {
 		log.Printf("[state] FilterUnseen(%s/%s) failed (proceeding without dedup): %v", pipeline, scope, err)
 		return items
@@ -29,7 +30,7 @@ func dedupByID[T any](pipeline, scope string, items []T, keyFn func(T) string) [
 			out = append(out, it)
 		}
 	}
-	if err := state.MarkSeen(pipeline, scope, ids); err != nil {
+	if err := s.MarkSeen(pipeline, scope, ids); err != nil {
 		log.Printf("[state] MarkSeen(%s/%s) failed: %v", pipeline, scope, err)
 	}
 	return out

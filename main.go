@@ -1013,7 +1013,7 @@ Description: We need an experienced LLM engineer to build a retrieval-augmented 
 					log.Printf("[pipeline:%s][step:%s] no unread emails, skipping pipeline", pipeline.Name, step.Name)
 					return nil // nothing to report
 				}
-				emails = dedupByID(pipeline.Name, "gmail", emails,
+				emails = statestore.DedupByID(state, pipeline.Name, "gmail", emails,
 					func(e gmailapi.Email) string { return e.ID })
 				if len(emails) == 0 {
 					log.Printf("[pipeline:%s][step:%s] all unread emails already processed, skipping pipeline", pipeline.Name, step.Name)
@@ -1066,7 +1066,7 @@ Description: We need an experienced LLM engineer to build a retrieval-augmented 
 					log.Printf("[pipeline:%s][step:%s] no new contacts, skipping pipeline", pipeline.Name, step.Name)
 					return nil
 				}
-				contacts = dedupByID(pipeline.Name, "ghl_contacts", contacts,
+				contacts = statestore.DedupByID(state, pipeline.Name, "ghl_contacts", contacts,
 					func(c ghlapi.GHLContact) string { return c.ID })
 				if len(contacts) == 0 {
 					log.Printf("[pipeline:%s][step:%s] all recent contacts already processed, skipping pipeline", pipeline.Name, step.Name)
@@ -1111,7 +1111,7 @@ Description: We need an experienced LLM engineer to build a retrieval-augmented 
 				}
 				// Composite key id|lastDate so a new message on an already-seen
 				// conversation is treated as a fresh item.
-				convos = dedupByID(pipeline.Name, "ghl_conversations", convos,
+				convos = statestore.DedupByID(state, pipeline.Name, "ghl_conversations", convos,
 					func(c ghlapi.GHLConversation) string { return c.ID + "|" + c.LastDate })
 				if len(convos) == 0 {
 					log.Printf("[pipeline:%s][step:%s] all unread conversations already processed, skipping pipeline", pipeline.Name, step.Name)

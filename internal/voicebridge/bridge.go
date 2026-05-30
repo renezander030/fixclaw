@@ -1,20 +1,123 @@
 //go:build voice
 
-package main
+// Package voicebridge wires draftcat's engine to the self-hosted voice plugin:
+// it boots the voice webhook server, registers pre-call lookups against the
+// engine's existing connectors, and dispatches the voice_*/dograh_* pipeline
+// actions. It depends only on the internal connector/store packages and the
+// decoded voice config, never on package main — so it lives outside the root.
+package voicebridge
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/renezander030/draftcat/internal/dograh"
+	ghlapi "github.com/renezander030/draftcat/internal/ghl"
+	statestore "github.com/renezander030/draftcat/internal/state"
 	"github.com/renezander030/draftcat/voice"
 )
 
-func tryVoiceAction(action, pipelineName string, vars map[string]string, data map[string]interface{}) (handled bool, skipPipeline bool, err error) {
-	// Admin actions: no voiceServer dependency (git is local, Dograh HTTP is
+// Bridge owns the running voice server plus the config + dedup store the
+// pipeline actions need. A nil *Bridge is the "voice disabled" state; all
+// methods are nil-safe so callers can hold a nil bridge without guarding.
+type Bridge struct {
+	server     *voice.Server
+	cfg        voice.Config
+	dedupStore *statestore.StateStore
+}
+
+// Boot decodes the raw `voice:` config node, and if enabled, starts the voice
+// webhook server (sharing the engine's SQLite file) and registers pre-call
+// lookups against the GHL connector (when configured). Returns nil when voice
+// is disabled, misconfigured, or no state store is available — that nil is a
+// valid "no voice" Bridge.
+func Boot(raw yaml.Node, st *statestore.StateStore, ghl *ghlapi.GHLConnector) *Bridge {
+	if st == nil {
+		return nil
+	}
+	var vcfg voice.Config
+	if err := raw.Decode(&vcfg); err != nil {
+		log.Printf("[voice] config decode failed (skipping voice): %v", err)
+		return nil
+	}
+	if !vcfg.Enabled {
+		return nil
+	}
+	srv, err := voice.NewServer(vcfg, st.DB())
+	if err != nil {
+		log.Printf("[voice] init failed: %v", err)
+		return nil
+	}
+	if srv == nil {
+		return nil
+	}
+	registerLookups(srv, ghl)
+	go func() {
+		if err := srv.Start(); err != nil && err.Error() != "http: Server closed" {
+			log.Printf("[voice] server stopped: %v", err)
+		}
+	}()
+	return &Bridge{server: srv, cfg: vcfg, dedupStore: st}
+}
+
+// registerLookups wires draftcat's existing connectors into the voice plugin's
+// pre-call lookup runner. Each backend is opt-in: when the underlying connector
+// isn't configured, the source is simply not registered and the lookup runner
+// emits a warning if a pipeline tries to use it.
+func registerLookups(srv *voice.Server, ghl *ghlapi.GHLConnector) {
+	if ghl == nil {
+		return
+	}
+	srv.Lookups().Register("ghl", func(ctx context.Context, phone string) (map[string]any, error) {
+		c, err := ghl.FetchContactByPhone(phone)
+		if err != nil {
+			return nil, err
+		}
+		if c == nil {
+			return nil, nil
+		}
+		out := map[string]any{
+			"account_name": strings.TrimSpace(c.FirstName + " " + c.LastName),
+			"email":        c.Email,
+			"contact_id":   c.ID,
+			"source":       c.Source,
+		}
+		for _, cf := range c.CustomField {
+			if cf.ID != "" && cf.Value != "" {
+				out["cf_"+cf.ID] = cf.Value
+			}
+		}
+		return out, nil
+	})
+}
+
+// Shutdown stops the voice server. Safe to call on a nil Bridge.
+func (b *Bridge) Shutdown() {
+	if b == nil || b.server == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := b.server.Shutdown(ctx); err != nil {
+		log.Printf("[voice] shutdown error: %v", err)
+	}
+}
+
+// TryAction handles the voice_*/dograh_* pipeline actions. Returns
+// (handled, skipPipeline, err): handled=false means the action isn't ours and
+// the caller should keep matching. Safe to call on a nil Bridge.
+func (b *Bridge) TryAction(action, pipelineName string, vars map[string]string, data map[string]interface{}) (handled bool, skipPipeline bool, err error) {
+	if b == nil {
+		return false, false, nil
+	}
+	// Admin actions: no voice store dependency (git is local, Dograh HTTP is
 	// configured separately). Keep them at the top so the guardrail pipeline
 	// runs even before any session has been recorded.
 	switch action {
@@ -27,7 +130,7 @@ func tryVoiceAction(action, pipelineName string, vars map[string]string, data ma
 		return true, false, nil
 
 	case "dograh_staging_smoke":
-		runID, err := dograh.DograhTriggerRun(dograhConfig(), setEnv(vars, "staging"), data)
+		runID, err := dograh.DograhTriggerRun(b.dograhConfig(), setEnv(vars, "staging"), data)
 		if err != nil {
 			return true, false, err
 		}
@@ -35,18 +138,18 @@ func tryVoiceAction(action, pipelineName string, vars map[string]string, data ma
 		return true, false, nil
 
 	case "dograh_prod_publish":
-		if err := dograh.DograhUpdateWorkflow(dograhConfig(), vars, data); err != nil {
+		if err := dograh.DograhUpdateWorkflow(b.dograhConfig(), vars, data); err != nil {
 			return true, false, err
 		}
 		data["voice_admin_publish_status"] = "ok"
 		return true, false, nil
 	}
 
-	// Harvest actions: require voiceServer (need the voice store).
-	if voiceServer == nil {
+	// Harvest actions: require the voice store.
+	if b.server == nil {
 		return false, false, nil
 	}
-	store := voiceServer.Store()
+	store := b.server.Store()
 	if store == nil {
 		return false, false, nil
 	}
@@ -58,7 +161,7 @@ func tryVoiceAction(action, pipelineName string, vars map[string]string, data ma
 		if err != nil {
 			return true, false, fmt.Errorf("voice_calls_completed: %w", err)
 		}
-		items = dedupByID(pipelineName, "voice_calls", items,
+		items = statestore.DedupByID(b.dedupStore, pipelineName, "voice_calls", items,
 			func(c voice.CompletedSession) string { return c.ID })
 		if len(items) == 0 {
 			return true, true, nil
@@ -73,7 +176,7 @@ func tryVoiceAction(action, pipelineName string, vars map[string]string, data ma
 		if err != nil {
 			return true, false, fmt.Errorf("voice_handoffs_pending: %w", err)
 		}
-		items = dedupByID(pipelineName, "voice_handoffs", items,
+		items = statestore.DedupByID(b.dedupStore, pipelineName, "voice_handoffs", items,
 			func(h voice.PendingHandoff) string { return strconv.FormatInt(h.ID, 10) })
 		if len(items) == 0 {
 			return true, true, nil
@@ -88,7 +191,7 @@ func tryVoiceAction(action, pipelineName string, vars map[string]string, data ma
 		if err != nil {
 			return true, false, fmt.Errorf("voice_learnings_new: %w", err)
 		}
-		items = dedupByID(pipelineName, "voice_learnings", items,
+		items = statestore.DedupByID(b.dedupStore, pipelineName, "voice_learnings", items,
 			func(l voice.NewLearning) string { return strconv.FormatInt(l.ID, 10) })
 		if len(items) == 0 {
 			return true, true, nil
@@ -121,6 +224,16 @@ func tryVoiceAction(action, pipelineName string, vars map[string]string, data ma
 	}
 
 	return false, false, nil
+}
+
+// dograhConfig maps the voice plugin's Dograh settings onto the dograh
+// connector's own Config, keeping internal/dograh free of any voice types.
+func (b *Bridge) dograhConfig() dograh.Config {
+	return dograh.Config{
+		BaseURL:    b.cfg.Dograh.BaseURL,
+		StagingURL: b.cfg.Dograh.StagingURL,
+		APIKeyEnv:  b.cfg.Dograh.APIKeyEnv,
+	}
 }
 
 type handoffResolution struct {
@@ -193,8 +306,8 @@ func formatLearningsForPrompt(items []voice.NewLearning) string {
 }
 
 // setEnv returns a copy of vars with "env" forced to the given value. Used to
-// route the same dograh_trigger_run helper at staging vs prod from different
-// action names.
+// route the same dograh trigger helper at staging vs prod from different action
+// names.
 func setEnv(vars map[string]string, env string) map[string]string {
 	out := make(map[string]string, len(vars)+1)
 	for k, v := range vars {
@@ -211,14 +324,4 @@ func varInt(vars map[string]string, key string, def int) int {
 		}
 	}
 	return def
-}
-
-// dograhConfig maps the voice plugin's Dograh settings onto the dograh
-// connector's own Config, keeping internal/dograh free of any voice types.
-func dograhConfig() dograh.Config {
-	return dograh.Config{
-		BaseURL:    voiceCfg.Dograh.BaseURL,
-		StagingURL: voiceCfg.Dograh.StagingURL,
-		APIKeyEnv:  voiceCfg.Dograh.APIKeyEnv,
-	}
 }
